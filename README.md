@@ -12,7 +12,7 @@
 
 发布者 ID 为 `salcara-local-20260930`。公开身份见 [publisher/public.json](publisher/public.json)，将 [公钥信任示例](publisher/trusted-publisher.example.yaml) 的条目合并到现有配置，保留 `allow_unsigned:false` 与其它原配置。私钥不在此仓库、插件包、GitHub Actions 或服务器中。此签名是 Salcara 独立发布者签名，不是 Sub2API/OpenAI 官方认证。
 
-完整插件说明见 [plugins/salcara-hub/README.md](plugins/salcara-hub/README.md)。宿主适配与更新操作见后续随 Release 交付的文档；签名不能给原版宿主增加能力。
+完整插件说明见 [插件说明](plugins/salcara-hub/README.md)，先阅读 [0.2.11 宿主适配与安装顺序](docs/HOST-UPGRADE.zh.md) 和 [检查更新/一键更新](docs/PLUGIN-UPDATES.zh.md)。[精确基线补丁](docs/host-adaptation-v0.2.11.patch) 只针对指定官方 commit，不对生产 dirty checkout 强行应用。签名不能给原版宿主增加能力。
 
 ## 从源码构建
 
