@@ -13,12 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 func main() {
 	goBinary := flag.String("go", "go", "Go executable")
- output := flag.String("output", "dist/salcara-hub-0.3.1.s2plugin", "output .s2plugin")
+	output := flag.String("output", "dist/salcara-hub-0.3.1.s2plugin", "output .s2plugin")
 	privatePath := flag.String("signing-key", "", "Base64 Ed25519 private key file")
 	keyID := flag.String("key-id", "", "publisher key ID")
 	flag.Parse()
@@ -93,6 +94,39 @@ func run(goBinary, output, privatePath, keyID string) error {
 		return err
 	}
 	files["LICENSE"] = license
+	// Redistributed runtime dependencies retain their complete notices. These
+	// legal resources are declared and hashed like all other package files.
+	legalRoot := filepath.Join(root, "licenses")
+	if err := filepath.WalkDir(legalRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return errors.New("license resources must not be symlinks")
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() > 1024*1024 {
+			return errors.New("invalid license resource")
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(relative)] = contents
+		return nil
+	}); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	hashes := map[string]string{}
 	for path, contents := range files {
 		hash := sha256.Sum256(contents)
@@ -131,7 +165,16 @@ func run(goBinary, output, privatePath, keyID string) error {
 		return err
 	}
 	writer := zip.NewWriter(target)
- for _, path := range []string{"manifest.json", "signature.json", "runtimes/linux-amd64/salcara-hub", "runtimes/linux-arm64/salcara-hub", "runtimes/windows-amd64/salcara-hub.exe", "ui/index.html", "ui/assets/app.css", "ui/assets/app.js", "README.md", "LICENSE"} {
+	packagePaths := []string{"manifest.json", "signature.json", "runtimes/linux-amd64/salcara-hub", "runtimes/linux-arm64/salcara-hub", "runtimes/windows-amd64/salcara-hub.exe", "ui/index.html", "ui/assets/app.css", "ui/assets/app.js", "README.md", "LICENSE"}
+	var legalPaths []string
+	for path := range files {
+		if strings.HasPrefix(path, "licenses/") {
+			legalPaths = append(legalPaths, path)
+		}
+	}
+	sort.Strings(legalPaths)
+	packagePaths = append(packagePaths, legalPaths...)
+	for _, path := range packagePaths {
 		contents, ok := files[path]
 		if !ok {
 			continue

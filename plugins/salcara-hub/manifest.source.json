@@ -8,7 +8,7 @@
   "requires": {
     "sub2api": ">=0.2.11 <0.2.12",
     "recommended_sub2api_version": "0.2.11+salcara.hub.1",
-    "tested_sub2api_versions": [],
+    "tested_sub2api_versions": ["0.2.11+salcara.hub.1"],
     "plugin_protocol": 1,
     "transport_api": 1,
     "ui_bridge": 1
