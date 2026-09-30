@@ -1,0 +1,40 @@
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111827;background:#fff;font-size:14px}
+*{box-sizing:border-box}
+body{margin:0}
+.page{max-width:900px;margin:auto;padding:24px 24px 28px}
+.header{display:flex;align-items:center;gap:13px;margin-bottom:22px}
+.header h1{font-size:19px;line-height:1.3;margin:0;font-weight:650}
+.header p{font-size:12px;color:#64748b;margin:3px 0 0}
+.mark{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:#eff6ff;color:#2790ed;font-size:23px;font-weight:750;flex:none}
+.health{margin-left:auto;border-radius:999px;padding:5px 11px;font-size:12px;color:#6b7280;background:#f3f4f6;white-space:nowrap}
+.health.ok{color:#15803d;background:#ecfdf3}
+.health.bad{color:#b91c1c;background:#fef2f2}
+.panel{border:1px solid #e5e7eb;border-radius:14px;padding:19px 20px;margin-bottom:14px}
+.section-title{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px}
+.section-title h2{font-size:15px;margin:0;font-weight:650}
+.section-title span{font-size:12px;color:#94a3b8}
+.muted{font-size:13px;line-height:1.6;color:#64748b;margin:0 0 12px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:15px}
+.stats>div{background:#f8fafc;border-radius:10px;padding:13px 12px;display:flex;flex-direction:column;gap:4px}
+.stats strong{font-size:21px;font-weight:650;font-variant-numeric:tabular-nums}
+.stats span{font-size:11px;color:#64748b}
+.groups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.group{display:flex;gap:10px;align-items:center;border:1px solid #e5e7eb;border-radius:10px;padding:11px 12px;cursor:pointer;min-width:0}
+.group:has(input:checked){border-color:#4ea8ff;background:#eff6ff}
+.group input{accent-color:#4ea8ff;flex:none}
+.group .name{font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.group .platform{margin-left:auto;color:#64748b;font-size:11px;white-space:nowrap}
+.field{display:block;margin-top:14px}
+.field span{display:block;font-weight:550;margin-bottom:7px}
+.field input{height:40px;width:100%;padding:0 11px;border:1px solid #dbe0e7;border-radius:9px;background:#fff;color:#111827;font:inherit;outline:none}
+.field input:focus{border-color:#4ea8ff;box-shadow:0 0 0 3px #eff6ff}
+.check{display:flex;gap:9px;align-items:center;margin-top:15px;color:#374151}
+.check input{accent-color:#4ea8ff}
+.footer{display:flex;align-items:center;justify-content:flex-end;gap:9px;padding-top:6px}
+.footer #notice{margin-right:auto;font-size:12px;color:#64748b}
+button{height:38px;padding:0 16px;border-radius:9px;font:inherit;font-weight:550;cursor:pointer}
+button:disabled{opacity:.55;cursor:wait}
+.primary{color:white;background:#4ea8ff;border:1px solid #4ea8ff}
+.secondary{color:#2563eb;background:#fff;border:1px solid #bfdbfe}
+@media(max-width:600px){.page{padding:17px}.panel{padding:16px}.stats{grid-template-columns:repeat(2,1fr)}.groups{grid-template-columns:1fr}.footer{flex-wrap:wrap}.footer #notice{width:100%}}
+.metric-note{margin-top:14px}.device-filters{display:flex;gap:10px;margin:12px 0}.device-filters input,.device-filters select{border:1px solid #dbe0e7;border-radius:8px;padding:9px;font:inherit}.device-filters input{flex:1;min-width:0}.table-scroll{overflow:auto}.device-table{width:100%;border-collapse:collapse;font-size:12px}.device-table th,.device-table td{text-align:left;border-bottom:1px solid #e5e7eb;padding:11px 8px;vertical-align:top}.device-table th{white-space:nowrap;color:#64748b}.device-table strong,.device-table small{display:block}.device-table small{font-size:11px;color:#64748b;line-height:1.6}.device-actions{min-width:110px}.device-actions button{height:29px;padding:0 7px;font-size:11px;margin:2px}.pagination{display:flex;align-items:center;gap:8px;margin-top:12px}.pagination span{margin-right:auto;color:#64748b;font-size:12px}.audit-list{max-height:230px;overflow:auto;font-size:12px;color:#475569}.audit-list p{padding-bottom:9px;border-bottom:1px solid #f1f5f9}dialog{max-width:520px;width:90%;border:1px solid #dbe0e7;border-radius:14px;padding:22px}dialog::backdrop{background:#0006}dialog h2{font-size:17px}.field textarea{width:100%;resize:vertical;border:1px solid #dbe0e7;border-radius:8px;padding:9px;font:inherit}dialog .footer{margin-top:15px}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "top.salcara.hub",
+  "name": "Salcara Hub",
+  "version": "0.3.1",
+  "description": "无需中转站用户账号或模型 Key 的设备扫码配对；本站独立部署的手机与桌面远程连接，不处理模型请求。",
+  "author": "Salcara",
+  "requires": {
+    "sub2api": ">=0.2.11 <0.2.12",
+    "recommended_sub2api_version": "0.2.11+salcara.hub.1",
+    "tested_sub2api_versions": [],
+    "plugin_protocol": 1,
+    "transport_api": 1,
+    "ui_bridge": 1
+  },
+  "capabilities": [
+    { "id": "salcara.hub.http.v1", "platform": "salcara", "account_type": "http" }
+  ],
+  "runtimes": {},
+  "ui": { "entrypoint": "ui/index.html" },
+  "files": {}
+}

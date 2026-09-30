@@ -1,0 +1,17 @@
+# No publisher private keys, generated binaries, device credentials or local configuration.
+.env*
+*.key
+*.pem
+*.p12
+*.jks
+*.keystore
+*.private*
+.private/
+private/
+plugins/salcara-hub/dist/
+plugins/salcara-hub/build/
+output/
+outputs/
+node_modules/
+backend/.installed/
+deploy/config.yaml
