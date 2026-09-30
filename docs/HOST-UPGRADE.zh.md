@@ -62,7 +62,7 @@ docker build --platform linux/amd64 \
 
 ## 签名信任配置
 
-宿主已有 `plugins.trusted_publishers` 配置，通常需要在服务器配置中追加并重启宿主生效，不是点击某个“忽略报错”按钮。使用本 Release 的 `trusted-publisher.example.yaml` 的**公钥**和对应 `key_id`；源码仓库内同一示例位于 `publisher/trusted-publisher.example.yaml`。核对发布者公钥指纹。不要上传 / 共享 `.private`、`.key` 或其他私钥文件。
+宿主已有 `plugins.trusted_publishers` 配置，通常需要在服务器配置中追加并重启宿主生效，不是点击某个“忽略报错”按钮。使用签名交付目录里的 `trusted-publisher.example.yaml` 的**公钥**和对应 `key_id`；核对发布者公钥指纹。不要上传 / 共享 `.private`、`.key` 或其他私钥文件。
 
 ```yaml
 plugins:
