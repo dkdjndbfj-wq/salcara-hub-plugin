@@ -52,6 +52,9 @@ func (h *Hub) readEventPageLocked(acct, deviceID, sessionKey string, after int64
 		return out
 	}
 	out.ResetRequired = after > 0 && (after < source.evictedThrough || after > a.seq)
+	if sessionKey != "" && after > 0 && after < a.sessionEvictedThrough {
+		out.ResetRequired = true
+	}
 	effectiveAfter := after
 	if after > a.seq {
 		effectiveAfter = 0

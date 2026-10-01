@@ -1,0 +1,125 @@
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const apiBase = '../_admin/v1/';
+  let token = '', epoch = 0, offset = 0, total = 0, pending = null, busy = false, updateCandidate = null, updaterConfigured = false, resourceMode = '', modes = [], modeCandidate = null;
+  const controllers = new Set();
+  const names = { ping: '测量', revoke: '撤销绑定', disconnect: '临时断开', ban: '封禁', unban: '解封', 'resource-mode': '切换运行模式' };
+  const limit = 50;
+  function note(message, error = false) { $('notice').textContent = message; $('notice').className = `notice${error ? ' error' : ''}`; }
+  function text(tag, value, cls = '') { const node = document.createElement(tag); node.textContent = String(value ?? '—'); if (cls) node.className = cls; return node; }
+  function moment(ms) { return Number(ms) > 0 ? new Date(Number(ms)).toLocaleString() : '尚无记录'; }
+  function clearData() { for (const id of ['online','registered','paired','running','waiting','pending','banned','errors']) $(id).textContent = '—'; $('devices').replaceChildren(); $('audit').replaceChildren(); }
+  function logout(message = '已退出，页面不再保留管理令牌。') {
+    token = ''; epoch++; for (const c of controllers) c.abort(); controllers.clear();
+    pending = null; busy = false; updateCandidate = null; updaterConfigured = false; resourceMode = ''; modes = []; modeCandidate = null; if ($('operation').open) $('operation').close(); if ($('update-dialog').open) $('update-dialog').close(); if ($('mode-dialog').open) $('mode-dialog').close();
+    $('mode-options').replaceChildren(); $('mode-current').textContent = '未认证'; $('mode-details').textContent = '';
+    $('admin-token').value = ''; $('login').disabled = false; $('workspace').hidden = true; $('login-panel').hidden = false; clearData(); syncUpdateButtons();
+    $('health').textContent = '尚未认证'; $('health').className = 'pill'; note(message);
+  }
+  async function request(path, method = 'GET', body) {
+    if (!token) throw new Error('请先验证管理员令牌。');
+    const generation = epoch, auth = token, controller = new AbortController(); controllers.add(controller);
+    const timeout = setTimeout(() => controller.abort(), path === 'update/check' ? 30000 : 20000);
+    try {
+      const response = await fetch(apiBase + path, { method, headers: { Authorization: `Bearer ${auth}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, credentials: 'omit', cache: 'no-store', redirect: 'error', signal: controller.signal, referrerPolicy: 'no-referrer' });
+      if (generation !== epoch || !token) throw new Error('管理员会话已关闭。');
+      if (response.status === 401) { logout('管理员令牌无效或已更换，请重新验证。'); throw new Error('管理员验证失败。'); }
+      let data; try { data = await response.json(); } catch { throw new Error('返回的不是 Hub 接口，请检查反向代理路径。'); }
+      if (generation !== epoch || !token) throw new Error('管理员会话已关闭。');
+      if (!response.ok) throw new Error(data.error || data.message || `请求失败（${response.status}）`);
+      return data;
+    } catch (error) { if (error.name === 'AbortError') throw new Error('请求中断或超时；操作可能已送达，请刷新状态，不要直接重复操作。'); throw error; }
+    finally { clearTimeout(timeout); controllers.delete(controller); }
+  }
+  function render(value) {
+    if (!token) return;
+    const stats = value.stats || {};
+    for (const [id, field] of Object.entries({ online:'online_devices', registered:'devices', paired:'paired_devices', running:'running_sessions', waiting:'waiting_approvals', pending:'pending_commands', banned:'banned_devices', errors:'request_errors' })) $(id).textContent = stats[field] ?? '—';
+    $('health').textContent = 'Hub 已连接'; $('health').className = 'pill ok';
+    $('version').textContent = value.standalone_version ? `服务 v${value.standalone_version}` : '独立 Docker 服务';
+    renderModes(value);
+    $('latency').textContent = stats.latency_samples > 0 ? `Hub ↔ 电脑指令往返均值 ${Number(stats.latency_mean_ms).toFixed(1)} ms，${stats.latency_samples} 次回复样本。不是手机全链路延迟。` : '尚未测量 Hub ↔ 电脑指令往返；可对在线设备点击“测量”。';
+    total = Number(value.total || 0); offset = Number(value.offset || 0);
+    const rows = $('devices'); rows.replaceChildren();
+    for (const d of value.devices || []) {
+      const tr = document.createElement('tr'), identity = document.createElement('td');
+      identity.append(text('strong', d.name || '未命名电脑'), text('small', `${d.os || '未知系统'} · Bridge ${d.version || '未知'}`), text('small', (d.tools || []).map(t => `${t.name || t.id}: ${t.available ? '已安装' : '未安装'}`).join('；') || '尚未上报工具'), text('small', `匿名标识 ${String(d.ref || '').slice(0,12)}…`));
+      const connection = document.createElement('td'); connection.append(text('span', d.banned ? '已封禁' : d.online ? '在线' : '离线'), text('small', d.paired ? '已绑定手机' : '未绑定手机'), text('small', `最近上报 ${moment(d.last_seen)}`)); if (d.banned) connection.append(text('small', d.ban_reason));
+      const latency = document.createElement('td'); if (d.latency?.samples) latency.append(text('span', `${Number(d.latency.last_ms).toFixed(1)} ms`), text('small', moment(d.latency.measured_at))); else latency.append(text('span', '未测量'));
+      const actions = document.createElement('td'); actions.className = 'device-actions';
+      for (const action of ['ping','revoke','disconnect', d.banned ? 'unban' : 'ban']) { const button = text('button', names[action], 'secondary'); button.type = 'button'; button.disabled = (action === 'ping' && (!d.online || d.banned)) || (action === 'disconnect' && !d.online); button.addEventListener('click', () => begin(action, d.ref)); actions.append(button); }
+      tr.append(identity, connection, text('td', `运行 ${d.running_sessions ?? 0} / 待电脑确认 ${d.waiting_approvals ?? 0}`), latency, actions); rows.append(tr);
+    }
+    if (!rows.children.length) { const tr = document.createElement('tr'), td = text('td', '没有匹配设备'); td.colSpan = 5; tr.append(td); rows.append(tr); }
+    $('page').textContent = `${total} 台匹配设备 · ${total ? offset+1 : 0}–${Math.min(offset+limit,total)}`; $('prev').disabled = offset <= 0; $('next').disabled = offset+limit >= total;
+    const audit = $('audit'); audit.replaceChildren();
+    for (const a of [...(value.audit || [])].reverse()) { const subject = a.device_ref ? `${String(a.device_ref).slice(0,12)}…` : '服务策略'; const reason = a.action === 'resource-mode' ? modes.find(p => p.id === a.reason)?.label || a.reason : a.reason || '测量连接'; audit.append(text('p', `${moment(a.at)} · ${a.actor === 'standalone-admin' ? '独立 Hub 管理员' : '宿主管理员'} · ${names[a.action] || a.action} · ${subject} · ${reason}`)); }
+    if (!audit.children.length) audit.append(text('p', '暂无管理操作。', 'muted'));
+    updaterConfigured = Boolean(value.update_configured);
+    if (!updateCandidate) $('update-status').textContent = updaterConfigured ? '已启用同容器签名程序更新；手动检查时才访问发布源。' : '当前由 Hub 单程序启动，没有连接签名更新组件。请使用配套 Docker 启动器，或按部署说明手动更新。';
+    $('check-update').disabled = !updaterConfigured || busy; $('update-result').disabled = !updaterConfigured || busy; $('install-update').disabled = !updateCandidate || busy;
+  }
+  async function refresh() {
+    const generation = epoch;
+    const query = new URLSearchParams({ query: $('search').value.trim(), filter: $('filter').value, offset: String(offset), limit: String(limit) });
+    try { const data = await request(`state?${query}`); render(data); note('状态已刷新；不会后台轮询。'); }
+    catch (error) { if (generation === epoch) { if (token) { $('health').textContent = '连接不可用'; $('health').className = 'pill bad'; } note(error.message, true); } throw error; }
+  }
+  function begin(action, ref) { if (busy) return; if (action === 'ping') { perform({ action, device_ref: ref, reason: '', confirm: true }); return; } pending = { action, device_ref: ref }; $('operation-title').textContent = `确认${names[action]}`; $('reason').value = ''; $('operation').showModal(); }
+  async function perform(value) { if (busy) return; const generation = epoch; busy = true; syncUpdateButtons(); note('正在执行；不会自动重试。'); try { await request('action', 'POST', value); await refresh(); if (generation === epoch) note('管理操作完成。'); } catch (error) { if (generation === epoch) note(error.message, true); } finally { if (generation === epoch) { busy = false; syncUpdateButtons(); } } }
+  $('login-form').addEventListener('submit', async event => { event.preventDefault(); if (busy) return; const candidate = $('admin-token').value.trim(); if (candidate.length < 32 || candidate.length > 4096) { note('令牌格式不正确。', true); return; } token = candidate; const generation = ++epoch; $('admin-token').value = ''; $('login').disabled = true; try { await refresh(); if (generation === epoch && token) { $('workspace').hidden = false; $('login-panel').hidden = true; } } catch { if (generation === epoch && token) logout('验证未完成，请检查 Hub 地址后重新输入管理令牌。'); } finally { if (generation === epoch) $('login').disabled = false; } });
+  $('logout').addEventListener('click', () => logout()); $('refresh').addEventListener('click', () => refresh().catch(() => {}));
+  $('filter-form').addEventListener('submit', event => { event.preventDefault(); offset = 0; refresh().catch(() => {}); });
+  $('prev').addEventListener('click', () => { offset = Math.max(0,offset-limit); refresh().catch(() => {}); }); $('next').addEventListener('click', () => { offset += limit; refresh().catch(() => {}); });
+  $('cancel-operation').addEventListener('click', () => { pending = null; $('operation').close(); });
+  $('operation-form').addEventListener('submit', event => { event.preventDefault(); if (!pending) return; const reason = $('reason').value.trim(); if (!reason || new TextEncoder().encode(reason).length > 256) { note('操作原因需要 1–256 字节。', true); return; } const action = { ...pending, reason, confirm: true }; pending = null; $('operation').close(); perform(action); });
+  function renderUpdate(value) {
+    if (!token) return;
+    updateCandidate = value.status === 'available' && /^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(value.latest_version || '') && /^[a-f0-9]{64}$/.test(value.sha256 || '') ? { version: value.latest_version, sha256: value.sha256 } : null;
+    const labels = { current: '已经是最新版本', available: '发现可用更新', unavailable: '暂时无法取得可信更新', unconfigured: '没有连接更新组件', updating: '更新任务已受理，请稍后查询结果', failed: '更新未完成，请查看状态；不要自动重试', updated: '更新完成', rolled_back: '新程序验证失败，已回到旧程序' };
+    $('update-status').textContent = `${labels[value.status] || '更新状态待确认'}${value.current_version ? ` · 当前 ${value.current_version}` : ''}${value.latest_version ? ` · 发布 ${value.latest_version}` : ''}${value.message ? `。${value.message}` : ''}${value.release_notes ? `\n${value.release_notes}` : ''}`;
+    $('install-update').disabled = !updateCandidate || busy; $('check-update').disabled = !updaterConfigured || busy; $('update-result').disabled = !updaterConfigured || busy;
+  }
+  function syncUpdateButtons() { $('check-update').disabled = !updaterConfigured || busy; $('update-result').disabled = !updaterConfigured || busy; $('install-update').disabled = !updateCandidate || busy; for (const button of $('mode-options').children) button.disabled = busy || button.dataset.mode === resourceMode; }
+  function renderModes(value) {
+    resourceMode = typeof value.resource_mode === 'string' ? value.resource_mode : '';
+    modes = Array.isArray(value.resource_modes) ? value.resource_modes.filter(p => p && ['economy','balanced','performance'].includes(p.id)) : [];
+    const current = modes.find(p => p.id === resourceMode);
+    $('mode-current').textContent = current ? `当前：${current.label}` : '模式配置不可用';
+    $('mode-options').replaceChildren();
+    for (const mode of modes) {
+      const button = text('button', '', `mode-card${mode.id === resourceMode ? ' selected' : ''}`); button.type = 'button'; button.dataset.mode = mode.id; button.setAttribute('aria-pressed', String(mode.id === resourceMode));
+      button.append(text('strong', `${mode.label}${mode.id === 'economy' ? ' · 默认推荐' : ''}`), text('span', mode.description || '使用服务器预设资源策略'), text('small', `Go 内存软目标 ${Number(mode.memory_limit_mib)} MiB`));
+      button.disabled = busy || mode.id === resourceMode;
+      button.addEventListener('click', () => { if (busy || mode.id === resourceMode) return; modeCandidate = mode.id; $('mode-target').textContent = `即将切换为“${mode.label}”。只调整 Hub 服务，不修改 Docker 硬上限或 Sub2API。`; $('mode-dialog').showModal(); });
+      $('mode-options').append(button);
+    }
+    $('mode-details').textContent = current ? `当前策略：每个设备账户最多缓存 ${Number(current.account_events)} 条事件 / 每个会话 ${Number(current.session_events)} 条${current.global_event_cache_bytes ? `；全站事件缓存预算 ${Number(current.global_event_cache_bytes) / 1048576} MiB` : ''}；手机流连接上限 ${Number(current.max_app_streams)} 个 / 账户${current.max_global_app_streams ? `、${Number(current.max_global_app_streams)} 个 / 全站` : ''}；Hub 待处理指令上限 ${Number(current.max_pending_commands)} 条。实际容量还取决于消息大小与服务器条件。` : '请确认已运行支持三种资源模式的独立 Hub 版本。';
+  }
+  $('cancel-mode').addEventListener('click', () => { modeCandidate = null; $('mode-dialog').close(); });
+  $('mode-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (!modeCandidate || busy || !modes.some(p => p.id === modeCandidate)) return;
+    const generation = epoch, target = { mode: modeCandidate, confirm: true }; modeCandidate = null; busy = true; $('mode-dialog').close(); syncUpdateButtons(); note('正在保存运行模式；不会自动重试。');
+    try { const value = await request('resource-mode', 'POST', target); await refresh(); if (generation === epoch) note(value.durability_warning ? '模式已生效，但配置同步未完成；断电后请重新确认模式。' : '运行模式已保存并生效。设备绑定与电脑原会话不受影响。', Boolean(value.durability_warning)); }
+    catch (error) { if (generation === epoch) note(`${error.message} 请刷新确认实际模式，不要直接重复提交。`, true); }
+    finally { if (generation === epoch) { busy = false; syncUpdateButtons(); } }
+  });
+  async function checkUpdate(check = false) {
+    if (!updaterConfigured || busy) return; const generation = epoch; busy = true; syncUpdateButtons(); note(check ? '正在核对可信发布版本…' : '正在读取本地更新状态…');
+    try { const value = await request(check ? 'update/check' : 'update/status', check ? 'POST' : 'GET', check ? {} : undefined); if (generation === epoch) { busy = false; renderUpdate(value); note('更新状态已读取，不会后台轮询。'); } }
+    catch (error) { if (generation === epoch) { updateCandidate = null; note(error.message, true); } }
+    finally { if (generation === epoch) { busy = false; syncUpdateButtons(); } }
+  }
+  $('check-update').addEventListener('click', () => checkUpdate(true)); $('update-result').addEventListener('click', () => checkUpdate(false));
+  $('install-update').addEventListener('click', () => { if (!updateCandidate || busy) return; $('update-target').textContent = `即将更新至 ${updateCandidate.version}，只更新 Hub 程序，不升级 Sub2API。`; $('update-dialog').showModal(); });
+  $('cancel-update').addEventListener('click', () => $('update-dialog').close());
+  $('update-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (!updateCandidate || busy) return; const generation = epoch, target = { ...updateCandidate, confirm: true }; updateCandidate = null; busy = true; $('update-dialog').close(); syncUpdateButtons();
+    note('提交更新任务；连接可能暂时中断。不会自动重试。');
+    try { const value = await request('update/apply', 'POST', target); if (generation === epoch) { busy = false; renderUpdate(value); note('更新任务已受理。这不等于更新完成，请稍后点击“查询更新结果”。'); } }
+    catch (error) { if (generation === epoch) note(`${error.message} 请稍后查询更新结果，不要重复提交。`, true); }
+    finally { if (generation === epoch) { busy = false; syncUpdateButtons(); } }
+  });
+  addEventListener('pagehide', () => logout('管理页面已关闭。'));
+})();

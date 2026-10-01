@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Salcara · 连接说明</title><link rel="icon" href="./icon.svg" type="image/svg+xml"><link rel="stylesheet" href="./app.css"><script src="./help.js" defer></script></head>
+<body><main class="page help-page">
+<header class="header"><div class="brand">S</div><div><p class="eyebrow">SALCARA REMOTE</p><h1>把电脑上的进度带到手机</h1></div><span id="health" class="pill">未检查</span></header>
+<p class="intro">本站只负责设备配对与消息转发。模型由你的电脑工具调用；连接不需要提交模型 API Key，扫码绑定后直接使用，不设用户审批。</p>
+<section class="panel"><h2>连接步骤</h2><ol class="steps"><li>在电脑端填写本站地址，选择 Agent 和需要使用的 API，再检查远程通道。</li><li>电脑生成临时二维码；用 Salcara 手机端扫码绑定，只能连接自己的设备。</li><li>手机选择电脑和原会话，按需查看进度或发送任务。网络恢复后先查询原任务状态，不要重复提交。</li></ol><p class="muted">换中转站要重新配对。此页面不展示其他人的设备、会话或管理统计。</p></section>
+<section class="panel"><div class="section-title"><h2>公开通道检查</h2><button id="check" type="button" class="secondary">检查连接</button></div><p id="status" class="muted">仅检查本站 Hub，不能确认你的电脑已在线或 Codex 桌面已授权。</p><code id="hub-url"></code></section>
+<section class="panel"><h2>使用边界</h2><p class="muted">当前不是端到端加密，本站可读取转发内容，请只连接信任的站点。Codex 原桌面续聊需要明确安装和限时授权；Claude Desktop 普通聊天远控尚未完成。CLI 与原桌面会话是不同路径。</p><p class="muted">设备、配对和封禁保存于独立 Hub 数据卷。运行中的会话事件只是限量缓存，不是永久云端聊天备份。服务器省资源模式会缩短暂存历史；完整历史仍需要从电脑端读取。</p></section>
+</main></body></html>

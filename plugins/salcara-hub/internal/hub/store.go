@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"container/list"
 	"encoding/json"
 	"sort"
 	"sync"
@@ -34,23 +35,68 @@ type storedEvent struct {
 
 // ring is a fixed-capacity FIFO of events ordered by seq.
 type ring struct {
+	capacity       int
+	bytes          int64
+	maxBytes       int64
 	buf            []*storedEvent
 	start          int
 	n              int
 	evictedThrough int64
 }
 
-func newRing(size int) *ring { return &ring{buf: make([]*storedEvent, size)} }
+func newRing(size int) *ring { return &ring{buf: make([]*storedEvent, size), capacity: size} }
 
-func (r *ring) push(e *storedEvent) {
-	if r.n < len(r.buf) {
-		r.buf[(r.start+r.n)%len(r.buf)] = e
-		r.n++
+func (r *ring) clearCache() {
+	for r.n > 0 {
+		r.pop()
+	}
+	r.buf = nil
+	r.start = 0
+}
+
+func newBoundedRing(size int, maxBytes int64) *ring {
+	return &ring{capacity: size, maxBytes: maxBytes}
+}
+
+func (r *ring) pop() {
+	if r.n == 0 {
 		return
 	}
-	r.evictedThrough = r.buf[r.start].seq
-	r.buf[r.start] = e
+	e := r.buf[r.start]
+	if e.seq > r.evictedThrough {
+		r.evictedThrough = e.seq
+	}
+	r.bytes -= int64(len(e.data))
+	r.buf[r.start] = nil
 	r.start = (r.start + 1) % len(r.buf)
+	r.n--
+}
+
+func (r *ring) resize(size int, maxBytes int64) {
+	next := newBoundedRing(size, maxBytes)
+	next.evictedThrough = r.evictedThrough
+	for i := 0; i < r.n; i++ {
+		next.push(r.buf[(r.start+i)%len(r.buf)])
+	}
+	*r = *next
+}
+
+func (r *ring) push(e *storedEvent) {
+	for r.n > 0 && (r.n >= len(r.buf) || r.maxBytes > 0 && r.bytes+int64(len(e.data)) > r.maxBytes) {
+		r.pop()
+	}
+	if r.maxBytes > 0 && int64(len(e.data)) > r.maxBytes {
+		if e.seq > r.evictedThrough {
+			r.evictedThrough = e.seq
+		}
+		return
+	}
+	if len(r.buf) == 0 {
+		r.buf = make([]*storedEvent, r.capacity)
+	}
+	r.buf[(r.start+r.n)%len(r.buf)] = e
+	r.n++
+	r.bytes += int64(len(e.data))
 }
 
 // after returns the buffered events with seq > after, oldest first.
@@ -80,10 +126,12 @@ type sseMsg struct {
 }
 
 type appSub struct {
-	ch       chan sseMsg
-	closed   chan struct{}
-	once     sync.Once
-	deviceID string
+	queuedBytes    int64 // guarded by Hub.mu
+	maxQueuedBytes int64
+	ch             chan sseMsg
+	closed         chan struct{}
+	once           sync.Once
+	deviceID       string
 }
 
 func (s *appSub) close() { s.once.Do(func() { close(s.closed) }) }
@@ -125,12 +173,17 @@ func (d *device) status() DeviceStatus {
 }
 
 type account struct {
-	id       string
-	devices  map[string]*device
-	seq      int64
-	events   *ring
-	sessions map[string]*sessionBuf
-	apps     map[*appSub]struct{}
+	owner                 *Hub
+	cacheBytes            int64
+	cacheEntry            *list.Element
+	resource              ResourcePreset
+	sessionEvictedThrough int64
+	id                    string
+	devices               map[string]*device
+	seq                   int64
+	events                *ring
+	sessions              map[string]*sessionBuf
+	apps                  map[*appSub]struct{}
 }
 
 func sessionID(deviceID, sessionKey string) string { return deviceID + "\x00" + sessionKey }
@@ -142,6 +195,8 @@ func (h *Hub) accountLocked(id string) *account {
 	a := h.accounts[id]
 	if a == nil {
 		a = &account{
+			owner:    h,
+			resource: h.resource,
 			id:       id,
 			devices:  map[string]*device{},
 			seq:      h.seqBase,
@@ -160,8 +215,14 @@ func (a *account) sendLocked(msg sseMsg) {
 		if msg.deviceID != "" && s.deviceID != msg.deviceID {
 			continue
 		}
+		if s.maxQueuedBytes > 0 && s.queuedBytes+int64(len(msg.data)) > s.maxQueuedBytes {
+			delete(a.apps, s)
+			s.close()
+			continue
+		}
 		select {
 		case s.ch <- msg:
+			s.queuedBytes += int64(len(msg.data))
 		default:
 			delete(a.apps, s)
 			s.close()
@@ -198,7 +259,7 @@ func (a *account) deviceStatusesLocked() []DeviceStatus {
 // session buffers and fans it out. fields is the decoded event object.
 func (a *account) appendEventLocked(deviceID string, fields map[string]json.RawMessage) (*storedEvent, error) {
 	if a.events == nil {
-		a.events = newRing(accountRingSize)
+		a.events = newBoundedRing(a.resource.AccountEvents, a.resource.AccountEventBytes)
 	}
 	seq := a.seq + 1
 	fields["seq"], _ = json.Marshal(seq)
@@ -221,10 +282,11 @@ func (a *account) appendEventLocked(deviceID string, fields map[string]json.RawM
 		id := sessionID(deviceID, sk)
 		sb := a.sessions[id]
 		if sb == nil {
-			if len(a.sessions) >= maxSessions {
+			if len(a.sessions) >= a.resource.MaxCachedSessions {
 				a.evictSessionLocked()
 			}
-			sb = &sessionBuf{ring: newRing(sessionRingSize)}
+			sb = &sessionBuf{ring: newBoundedRing(a.resource.SessionEvents, a.resource.SessionEventBytes)}
+			sb.ring.evictedThrough = a.sessionEvictedThrough
 			a.sessions[id] = sb
 		}
 		sb.ring.push(e)
@@ -244,6 +306,11 @@ func (a *account) appendEventLocked(deviceID string, fields map[string]json.RawM
 			}
 		}
 	}
+	a.trimSessionBytesLocked()
+	a.syncCacheBytesLocked(true)
+	if a.owner != nil {
+		a.owner.trimGlobalCacheLocked()
+	}
 	a.sendLocked(sseMsg{event: "event", data: data, seq: seq, deviceID: deviceID})
 	return e, nil
 }
@@ -255,6 +322,9 @@ func (a *account) evictSessionLocked() {
 		if min < 0 || sb.updated < min {
 			oldest, min = id, sb.updated
 		}
+	}
+	if sb := a.sessions[oldest]; sb != nil && sb.updated > a.sessionEvictedThrough {
+		a.sessionEvictedThrough = sb.updated
 	}
 	delete(a.sessions, oldest)
 }

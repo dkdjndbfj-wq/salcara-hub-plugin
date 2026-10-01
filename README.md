@@ -1,6 +1,18 @@
-# Salcara Hub 插件
+# Salcara Hub：独立服务与插件
 
-独立站点部署的电脑/手机扫码配对与远程消息转发插件。不要求本站账号、模型 API Key、余额或特定模型分组。站点不同，配对凭据独立。
+独立站点部署的电脑/手机扫码配对与远程消息转发服务。不要求本站账号、模型 API Key、余额或特定模型分组。站点不同，配对凭据独立。
+
+## 推荐：独立 Docker + 可视化侧边栏
+
+新部署推荐 [独立 Docker 安装说明](docs/STANDALONE-DOCKER.zh.md)：单独运行 Hub，将 `/salcara-hub/` 反代到独立容器，再把同源管理页添加到 Sub2API 的自定义 iframe 侧边栏。**无需修改官方 Sub2API 或安装服务器插件**；Sub2API 与 Hub 分别升级。管理员入口和普通用户说明页分离，管理员 API 另有独立随机令牌，不拿模型 Key 或 Sub2API iframe token 当管理员权限。
+
+独立源码包含 [Dockerfile](Dockerfile)、[Compose](compose.yml)、[Nginx 路径片段](deploy/standalone/nginx-location.conf) 和仅构建/测试的 [CI](.github/workflows/standalone-docker.yml)。**一个 Hub 容器**内的非 root 启动器支持网页检查并一键更新签名 Hub 应用，无需第二个更新器容器、不挂 Docker socket；底层镜像/启动器仍通过 Compose 更新，二者不能混称。当前从源码构建，不提供猜测的镜像地址；正式签名源尚未发布时检查显示不可用，原程序照常运行。
+
+控制台可选择“省资源 / 均衡 / 高负载”，默认省资源，真实调整暂存与新请求并发，确认后持久化，不取消已在电脑执行的任务。默认整个容器 384 MiB 是硬配额而非实测占用；Hub Go 软目标分别为 96 / 192 / 320 MiB，页面切换不会改 Docker 硬限，也不是用户数量承诺。父启动器软目标另为 32 MiB；应用升级只重启 Hub，会短暂中断远程连接。更新会先验固定发布者签名、大小/哈希、启动/数据协议，失败不启动未验证程序；程序回退不是用户数据回滚。
+
+**官方 0.2.11 自定义 iframe 会向 URL 追加本站登录 token**。只使用自己控制的同源 HTTPS 页面，按文档禁用该路径 query 日志，并检查 CDN/WAF；Hub 收到静态页参数会先 303 清除，不把它当 SSO。菜单“管理员可见”不是 API 鉴权。
+
+## 已发布插件：保留为旧部署方式
 
 **原版 Sub2API 0.2.11 不能直接安装此 Hub 插件。** 它只接受 `openai.oauth.outbound_transport.v1`；本插件需要配套 `salcara.hub.http.v1` 宿主扩展。不要为了安装插件降级服务器，不要修改 capability 字符串冒充 OAuth 插件。
 

@@ -1,0 +1,3 @@
+module salcara/hubplugin
+
+go 1.27.0

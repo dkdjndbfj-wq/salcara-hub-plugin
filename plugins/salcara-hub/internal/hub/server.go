@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"container/list"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -17,12 +18,15 @@ import (
 
 // Hub is the HTTP handler and in-memory state of the service.
 type Hub struct {
-	cfg           Config
-	log           *slog.Logger
-	auth          *authenticator
-	limiter       *failLimiter
-	enrollLimiter *failLimiter
-	routes        map[string]route
+	eventCacheBytes int64          // guarded by mu
+	cacheOrder      *list.List     // least recently updated payload cache first, under mu
+	resource        ResourcePreset // guarded by mu, never mutate shared cfg live
+	cfg             Config
+	log             *slog.Logger
+	auth            *authenticator
+	limiter         *failLimiter
+	enrollLimiter   *failLimiter
+	routes          map[string]route
 
 	mu              sync.Mutex
 	accounts        map[string]*account
@@ -67,7 +71,17 @@ type route struct {
 // New creates a Hub, loading persisted devices from cfg.DataDir.
 func New(cfg Config) (*Hub, error) {
 	cfg.setDefaults()
+	resource := legacyResourceMode()
+	if cfg.ResourceMode != "" {
+		var ok bool
+		resource, ok = ResourceMode(cfg.ResourceMode)
+		if !ok {
+			return nil, errors.New("invalid Hub resource mode")
+		}
+	}
 	h := &Hub{
+		cacheOrder:      list.New(),
+		resource:        resource,
 		cfg:             cfg,
 		log:             cfg.Logger,
 		auth:            newAuthenticator(&cfg),
@@ -267,6 +281,10 @@ func (h *Hub) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) authenticate(w http.ResponseWriter, r *http.Request, ip string) (string, bool) {
+	if h.cfg.DisableLegacyAPIKey {
+		writeError(w, http.StatusUnauthorized, "请使用已配对的设备凭据；本站不接受模型 API Key 登录")
+		return "", false
+	}
 	key := bearerKey(r)
 	if key != "" && h.auth.cachedValid(key) {
 		return AccountID(key), true
@@ -405,7 +423,11 @@ func (s *sseWriter) send(event string, data []byte) error {
 func (h *Hub) handlePing(w http.ResponseWriter, _ *http.Request, _ string) {
 	caps, ttl := h.commandCapabilities()
 	caps = append([]string{"device.identity.v1", "pair.qr.v1", "session.remote.v1", "pair.revoke.v1"}, caps...)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "salcara-hub", "version": Version, "protocol": "salcara-remote", "protocolVersion": 1, "authModes": []string{"device-pairing", "legacy-api-key"}, "capabilities": caps, "commandIdempotencyTTLSeconds": ttl})
+	authModes := []string{"device-pairing"}
+	if !h.cfg.DisableLegacyAPIKey {
+		authModes = append(authModes, "legacy-api-key")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "salcara-hub", "version": Version, "protocol": "salcara-remote", "protocolVersion": 1, "authModes": authModes, "capabilities": caps, "commandIdempotencyTTLSeconds": ttl})
 }
 
 func (h *Hub) handleMe(w http.ResponseWriter, _ *http.Request, acct string) {
@@ -448,7 +470,6 @@ func (h *Hub) handleBridgeStream(w http.ResponseWriter, r *http.Request, acct st
 		writeError(w, http.StatusBadRequest, "deviceId 不能为空")
 		return
 	}
-	conn := &bridgeConn{cmds: make(chan []byte, commandQueueSize), closed: make(chan struct{})}
 	h.mu.Lock()
 	a := h.accounts[acct]
 	var dev *device
@@ -470,6 +491,12 @@ func (h *Hub) handleBridgeStream(w http.ResponseWriter, r *http.Request, acct st
 		writeError(w, 403, "这台电脑已被本站封禁")
 		return
 	}
+	if dev.conn == nil && h.resource.MaxBridgeStreams > 0 && h.bridgeStreamCountLocked() >= h.resource.MaxBridgeStreams {
+		h.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, "本站电脑连接已达当前资源模式上限，请稍后重试")
+		return
+	}
+	conn := &bridgeConn{cmds: make(chan []byte, h.resource.BridgeQueueMessages), closed: make(chan struct{})}
 	old := dev.conn
 	dev.conn = conn
 	dev.lastSeen = nowMs()
@@ -673,13 +700,13 @@ func (h *Hub) handleAppStream(w http.ResponseWriter, r *http.Request, acct strin
 		return
 	}
 	deviceID := dev.info.DeviceID
-	sub := &appSub{ch: make(chan sseMsg, appQueueSize), closed: make(chan struct{}), deviceID: deviceID}
 	a := h.accountLocked(acct)
-	if len(a.apps) >= maxAppStreams {
+	if len(a.apps) >= h.resource.MaxAppStreams || h.resource.MaxGlobalAppStreams > 0 && h.appStreamCountLocked() >= h.resource.MaxGlobalAppStreams {
 		h.mu.Unlock()
 		writeError(w, http.StatusTooManyRequests, "同时打开的连接太多了")
 		return
 	}
+	sub := &appSub{ch: make(chan sseMsg, h.resource.AppQueueMessages), closed: make(chan struct{}), deviceID: deviceID, maxQueuedBytes: h.resource.AppQueueBytes}
 	a.apps[sub] = struct{}{}
 	devices := []DeviceStatus{dev.status()}
 	if after > a.seq {
@@ -742,6 +769,12 @@ func (h *Hub) handleAppStream(w http.ResponseWriter, r *http.Request, acct strin
 	for {
 		select {
 		case m := <-sub.ch:
+			h.mu.Lock()
+			sub.queuedBytes -= int64(len(m.data))
+			if sub.queuedBytes < 0 {
+				sub.queuedBytes = 0
+			}
+			h.mu.Unlock()
 			if streamStopped() {
 				return
 			}

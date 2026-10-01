@@ -196,7 +196,7 @@ func (h *Hub) AdminActionAs(ctx context.Context, action, ref, reason, actor stri
 		}
 	}
 	h.mu.Lock()
-	if len(actor) > 64 || !regexp.MustCompile(`^host-admin(:[0-9]+)?$`).MatchString(actor) {
+	if len(actor) > 64 || !regexp.MustCompile(`^(host-admin(:[0-9]+)?|standalone-admin)$`).MatchString(actor) {
 		actor = "host-admin"
 	}
 	accountID, dev := h.adminDeviceLocked(ref)
@@ -331,7 +331,7 @@ func (h *Hub) executeCommand(ctx context.Context, accountID, deviceID string, co
 		h.mu.Unlock()
 		return replyBody{Error: "电脑不在线"}, 409
 	}
-	if len(h.pending) >= maxPendingCommands {
+	if len(h.pending) >= h.resource.MaxPendingCommands || h.resource.MaxAccountPendingCommands > 0 && h.accountPendingCountLocked(accountID) >= h.resource.MaxAccountPendingCommands {
 		h.mu.Unlock()
 		return replyBody{Error: "本站待处理指令过多"}, 429
 	}

@@ -1,0 +1,45 @@
+name: Standalone Docker build and smoke test
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: [Dockerfile, .dockerignore, compose.yml, 'deploy/standalone/**', 'plugins/salcara-hub/internal/hub/**', 'plugins/salcara-hub/internal/standalone/**', 'plugins/salcara-hub/internal/launcher/**', 'plugins/salcara-hub/cmd/hub/**', 'plugins/salcara-hub/cmd/hub-launcher/**', '.github/workflows/standalone-docker.yml']
+permissions:
+  contents: read
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate Compose without operator secrets
+        env:
+          SALCARA_HUB_PUBLIC_URL: https://relay.example.com/salcara-hub
+        run: docker compose -f compose.yml config --quiet
+      - name: Test administrator UI privacy and interactions
+        run: node --test deploy/standalone/admin-ui.test.mjs
+      - name: Build amd64 (tests and vet run inside the builder)
+        run: docker buildx build --platform linux/amd64 --load --tag salcara-hub-standalone:ci .
+      - name: Run isolated non-root container smoke test
+        run: node deploy/standalone/container-smoke.mjs salcara-hub-standalone:ci
+      - name: Cross-build arm64 (not an arm64 runtime test)
+        run: docker buildx build --platform linux/arm64 --output type=oci,dest=/tmp/salcara-hub-linux-arm64.oci.tar .
+      - name: Export unsigned development binaries and amd64 image
+        run: |
+          docker buildx build --target binary-export --platform linux/amd64 --output type=local,dest=/tmp/salcara-hub-artifacts/linux-amd64 .
+          docker buildx build --target binary-export --platform linux/arm64 --output type=local,dest=/tmp/salcara-hub-artifacts/linux-arm64 .
+          docker image save salcara-hub-standalone:ci --output /tmp/salcara-hub-artifacts/salcara-hub-linux-amd64.docker.tar
+          cp /tmp/salcara-hub-linux-arm64.oci.tar /tmp/salcara-hub-artifacts/
+          cp deploy/standalone/CI-ARTIFACT.md /tmp/salcara-hub-artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: salcara-hub-standalone-development
+          path: /tmp/salcara-hub-artifacts/
+          retention-days: 14
+          if-no-files-found: error
+      # Deliberately no registry login, image push, release, APK or deploy step.

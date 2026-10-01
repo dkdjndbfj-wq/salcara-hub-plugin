@@ -35,6 +35,12 @@ const (
 
 // Config configures a Hub. Zero values are replaced by defaults in New.
 type Config struct {
+	// ResourceMode is optional; an empty value preserves legacy plugin count
+	// defaults. Standalone explicitly chooses economy or a saved mode.
+	ResourceMode string
+	// DisableLegacyAPIKey makes the standalone device-pairing service independent
+	// of Sub2API and rejects bearer-only model keys before any upstream request.
+	DisableLegacyAPIKey bool
 	// Sub2APIURL is the base URL of the relay, e.g. http://127.0.0.1:8080.
 	Sub2APIURL      string
 	AllowedGroupIDs []int64
