@@ -28,6 +28,19 @@ async function request(path, options = {}) {
   return fetch(`${base}${path}`, { ...options, signal: AbortSignal.timeout(5000) });
 }
 let base;
+function refreshBoundPort() {
+  const port = docker(['port', container, '8787/tcp']);
+  assert.match(port, /^127\.0\.0\.1:\d+$/);
+  base = `http://${port}`;
+}
+function startupFailure(message) {
+  // Only this freshly-created labelled fixture; never dump operator env/token.
+  const state = docker(['inspect', '--format', '{{json .State}}', container]);
+  const logs = spawnSync('docker', ['logs', container], { encoding: 'utf8', timeout: 45000 });
+  const safeLogs = `${logs.stdout ?? ''}${logs.stderr ?? ''}`.replace(/[a-f0-9]{64}/gi, '[redacted]');
+  console.error(`Isolated fixture ${message}: state=${state}; current bound URL=${base}; logs=${safeLogs}`);
+  throw new Error(message);
+}
 try {
   const config = JSON.parse(docker(['image', 'inspect', image]))[0].Config;
   assert.equal(config.User, '65532:65532');
@@ -55,12 +68,10 @@ try {
   assert.equal(runtime.HostConfig.PidsLimit, 64);
   assert.ok(runtime.HostConfig.CapDrop.includes('ALL'));
   assert.ok(runtime.HostConfig.SecurityOpt.some(value => /^no-new-privileges(?:=true)?$/.test(value)));
-  const port = docker(['port', container, '8787/tcp']);
-  assert.match(port, /^127\.0\.0\.1:\d+$/);
-  base = `http://${port}`;
+  refreshBoundPort();
   for (let i = 0; i < 40; i++) {
     try { if ((await request('/healthz')).ok) break; } catch { /* startup */ }
-    if (i === 39) throw new Error('isolated test container did not become healthy');
+    if (i === 39) startupFailure('isolated test container did not become healthy');
     await sleep(250);
   }
   docker(['exec', container, '/salcara-hub-launcher', '-healthcheck']);
@@ -108,9 +119,12 @@ try {
   console.log(`Isolated idle container only (not a capacity promise): memory=${stats.MemUsage}, CPU=${stats.CPUPerc}, PIDs=${stats.PIDs}.`);
   docker(['stop', '--time', '30', container]);
   docker(['start', container]);
+  // Docker may allocate a different ephemeral host port after stop/start.
+  // Read the new binding instead of probing the former, now closed port.
+  refreshBoundPort();
   for (let i = 0; i < 40; i++) {
     try { if ((await request('/healthz')).ok) break; } catch { /* startup */ }
-    if (i === 39) throw new Error('restart failed');
+    if (i === 39) startupFailure('restart failed');
     await sleep(250);
   }
   const restarted = await request('/salcara-hub/_admin/v1/state', { headers: adminHeaders });

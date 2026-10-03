@@ -60,3 +60,11 @@
 不要 stage `output/`、宿主补丁、原插件 UI、SDK、个人版、私钥、用户数据、服务器配置。`output/` 全部是临时本地验证，不应上传。
 
 CI/人工步骤见 `STANDALONE-RELEASE.zh.md`。源发布、GHCR image、GitHub Release、signed feed 是四步，不会重启或部署任何生产服务器。
+
+## 第一轮远端 CI 与测试修正
+
+- main 源提交 `3d8cc81b72bce64ada056c4f40a550805ee79f31`，运行 `37138695440`。
+- Linux Docker build 内全包测试、vet、race 已通过；真实非 root/read-only 容器完成初始化、鉴权、资源模式、更新状态验证后，stop/start 健康探测失败，因此没有镜像推送或 Release。
+- 测试使用 Docker 临时随机宿主端口；stop/start 后仍探测旧端口。测试脚本现每次启动后重新读取绑定，保留重启持久化全部断言，并在失败时输出仅新测试容器的状态和脱敏日志。没有修改 Hub 运行内核来绕过失败。
+- 第一次测得闲置新容器 11.89 MiB / 限额 384 MiB；这不代表生产负载容量或峰值。
+- 修正仍必须再跑 CI，以实际结果确认根因；不能因推测端口改变就宣称修复完成。
