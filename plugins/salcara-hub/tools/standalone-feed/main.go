@@ -33,6 +33,7 @@ type binary struct {
 }
 
 type payload struct {
+	Product          string            `json:"product"`
 	Version          string            `json:"version"`
 	LauncherProtocol int               `json:"launcher_protocol"`
 	DataSchema       int               `json:"data_schema"`
@@ -267,10 +268,10 @@ func uniqueJSON(d *json.Decoder, depth int) error {
 
 func validatePayload(raw []byte, p payload) error {
 	var root map[string]json.RawMessage
-	if json.Unmarshal(raw, &root) != nil || len(root) != 5 || root["release_notes"] == nil {
-		return errors.New("all five public payload fields are required")
+	if json.Unmarshal(raw, &root) != nil || len(root) != 6 || root["release_notes"] == nil {
+		return errors.New("all six public payload fields are required")
 	}
-	if len(p.Version) > 96 || !versionPattern.MatchString(p.Version) || p.LauncherProtocol != 1 || p.DataSchema != 1 {
+	if p.Product != "salcara-hub-standalone" || len(p.Version) > 96 || !versionPattern.MatchString(p.Version) || p.LauncherProtocol != 1 || p.DataSchema != 1 {
 		return errors.New("version, launcher protocol, or data schema is unsupported")
 	}
 	// Match the launcher's bounded bare-version subset: uint32 components,

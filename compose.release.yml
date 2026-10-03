@@ -1,0 +1,41 @@
+# Alternative to compose.yml, not an override. Keep this project's existing data volume.
+name: salcara-hub-standalone
+services:
+  hub:
+    image: ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:${SALCARA_HUB_IMAGE_VERSION:-0.4.0}
+    user: "65532:65532"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      SALCARA_HUB_LISTEN: ":8787"
+      SALCARA_HUB_DATA_DIR: /data
+      SALCARA_HUB_ADMIN_TOKEN_FILE: /data/admin-token
+      SALCARA_HUB_PUBLIC_URL: "${SALCARA_HUB_PUBLIC_URL:?Set the HTTPS site URL ending in /salcara-hub}"
+      SALCARA_HUB_TRUST_PROXY: "true"
+      SALCARA_HUB_CLEANUP_UNPAIRED_DAYS: "7"
+      SALCARA_HUB_CLEANUP_PAIRED_DAYS: "0"
+      SALCARA_HUB_DISABLE_UPDATES: "${SALCARA_HUB_DISABLE_UPDATES:-false}"
+      # Optional FCM: also enable the matching read-only volume below.
+      # SALCARA_HUB_FCM_CREDENTIALS_FILE: /run/secrets/fcm-service-account.json
+      GOMEMLIMIT: 32MiB
+      GOMAXPROCS: "2"
+    volumes:
+      - hub-data:/data
+      # - ./secrets/fcm-service-account.json:/run/secrets/fcm-service-account.json:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    mem_limit: 384m
+    cpus: 1.0
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  hub-data:

@@ -66,7 +66,7 @@ func testFeed(data []byte) Feed {
 	b := Binary{URL: "https://updates.example.com/hub-amd64", SHA256: hex.EncodeToString(hash[:]), Size: int64(len(data))}
 	arm := b
 	arm.URL = "https://updates.example.com/hub-arm64"
-	return Feed{Version: "0.4.0", LauncherProtocol: 1, DataSchema: 1, ReleaseNotes: "fixture release", Binaries: map[string]Binary{"linux/amd64": b, "linux/arm64": arm}}
+	return Feed{Product: Product, Version: "0.4.0", LauncherProtocol: 1, DataSchema: 1, ReleaseNotes: "fixture release", Binaries: map[string]Binary{"linux/amd64": b, "linux/arm64": arm}}
 }
 
 type fixture struct {

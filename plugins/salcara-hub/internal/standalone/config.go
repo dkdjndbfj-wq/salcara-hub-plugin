@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"salcara/hubplugin/internal/hub"
 )
 
 const Prefix = "/salcara-hub"
@@ -23,6 +25,8 @@ const Prefix = "/salcara-hub"
 // Version is set by the standalone release build via -ldflags -X. The
 // launcher verifies this exact value in /healthz before completing an update.
 var Version = "0.4.0-dev"
+
+const Product = "salcara-hub-standalone"
 
 const defaultListen = ":8787"
 const defaultTokenFile = "/data/admin-token"
@@ -37,14 +41,35 @@ type Config struct {
 	ControlSocket    string
 	ControlTokenFile string
 	ResourceMode     string
+	// Initial inactive-computer cleanup in days (0 = off) until the admin page
+	// saves its own setting. Defaults: unpaired 7 days, paired off.
+	CleanupUnpairedDays int
+	CleanupPairedDays   int
+	// TrustProxy uses the address the reverse proxy puts in X-Forwarded-For.
+	// Only enable it when the port is reachable by that proxy alone (the
+	// Compose file publishes it on 127.0.0.1); otherwise every client shares
+	// the proxy's address and one attacker's failures lock out everyone.
+	TrustProxy bool
+	// FCMCredentialsFile is a Firebase service-account key (JSON) for push
+	// notifications to paired phones. Empty = no push (phones fall back to
+	// their own background connection).
+	FCMCredentialsFile string
 }
 
-// ConfigFromEnv intentionally has no Sub2API URL, API key, proxy trust, or
-// legacy-auth switch. An independent deployment never calls the model relay.
+// ConfigFromEnv intentionally has no Sub2API URL, API key or legacy-auth
+// switch. An independent deployment never calls the model relay.
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	c := Config{DataDir: getenv("SALCARA_HUB_DATA_DIR"), AdminTokenFile: getenv("SALCARA_HUB_ADMIN_TOKEN_FILE"), Listen: getenv("SALCARA_HUB_LISTEN"), PublicURL: getenv("SALCARA_HUB_PUBLIC_URL")}
 	c.ControlSocket, c.ControlTokenFile = getenv("SALCARA_HUB_CONTROL_SOCKET"), getenv("SALCARA_HUB_CONTROL_TOKEN_FILE")
 	c.ResourceMode = getenv("SALCARA_HUB_RESOURCE_MODE")
+	c.FCMCredentialsFile = strings.TrimSpace(getenv("SALCARA_HUB_FCM_CREDENTIALS_FILE"))
+	switch strings.ToLower(strings.TrimSpace(getenv("SALCARA_HUB_TRUST_PROXY"))) {
+	case "", "0", "false", "no":
+	case "1", "true", "yes":
+		c.TrustProxy = true
+	default:
+		return Config{}, errors.New("SALCARA_HUB_TRUST_PROXY must be true or false")
+	}
 	if c.AdminTokenFile == "" {
 		c.AdminTokenFile = defaultTokenFile
 	}
@@ -52,6 +77,12 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		c.Listen = defaultListen
 	}
 	var err error
+	if c.CleanupUnpairedDays, err = envDays(getenv("SALCARA_HUB_CLEANUP_UNPAIRED_DAYS"), 7); err != nil {
+		return Config{}, fmt.Errorf("SALCARA_HUB_CLEANUP_UNPAIRED_DAYS: %w", err)
+	}
+	if c.CleanupPairedDays, err = envDays(getenv("SALCARA_HUB_CLEANUP_PAIRED_DAYS"), 0); err != nil {
+		return Config{}, fmt.Errorf("SALCARA_HUB_CLEANUP_PAIRED_DAYS: %w", err)
+	}
 	c.CommandTimeout, err = envDuration(getenv("SALCARA_HUB_COMMAND_TIMEOUT"), 45*time.Second, time.Second, 120*time.Second)
 	if err != nil {
 		return Config{}, fmt.Errorf("SALCARA_HUB_COMMAND_TIMEOUT: %w", err)
@@ -61,6 +92,18 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("SALCARA_HUB_PING_INTERVAL: %w", err)
 	}
 	return c, c.Validate()
+}
+
+func envDays(raw string, fallback int) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 || n > hub.MaxDeviceCleanupDays {
+		return 0, fmt.Errorf("must be whole days between 0 (off) and %d", hub.MaxDeviceCleanupDays)
+	}
+	return n, nil
 }
 
 func envDuration(raw string, fallback, minimum, maximum time.Duration) (time.Duration, error) {
@@ -75,6 +118,9 @@ func envDuration(raw string, fallback, minimum, maximum time.Duration) (time.Dur
 }
 
 func (c Config) Validate() error {
+	if c.FCMCredentialsFile != "" && !filepath.IsAbs(c.FCMCredentialsFile) {
+		return errors.New("SALCARA_HUB_FCM_CREDENTIALS_FILE must be an absolute path")
+	}
 	if c.ResourceMode != "" && c.ResourceMode != "economy" && c.ResourceMode != "balanced" && c.ResourceMode != "performance" {
 		return errors.New("SALCARA_HUB_RESOURCE_MODE must be economy, balanced, or performance")
 	}
@@ -195,4 +241,24 @@ func readAdminToken(path string) ([]byte, error) {
 		}
 	}
 	return []byte(token), nil
+}
+
+// readFCMCredentials loads the Firebase service-account key; it is a secret,
+// so a file readable by other users is refused (except on Windows).
+func readFCMCredentials(path string) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
+		return nil, errors.New("SALCARA_HUB_FCM_CREDENTIALS_FILE must be a regular file (a Firebase service account key)")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+		return nil, errors.New("FCM service account file must not be readable by group or other users (use mode 0600 or 0400)")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errors.New("FCM service account file is not readable")
+	}
+	return data, nil
 }

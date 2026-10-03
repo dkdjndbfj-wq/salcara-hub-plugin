@@ -87,7 +87,7 @@ func TestAdminBanPersistentlyBlocksSameIDAndInvalidatesPhonesAndTickets(t *testi
 		}
 	}
 	h.mu.Lock()
-	_, status := h.registerDeviceLocked("another-legacy-account", Device{DeviceID: id}, sha256.Sum256([]byte(secret)))
+	_, status, _ := h.registerDeviceLocked("another-legacy-account", Device{DeviceID: id}, sha256.Sum256([]byte(secret)))
 	h.mu.Unlock()
 	if status != 403 {
 		t.Fatal("same device ID bypassed ban via namespace")

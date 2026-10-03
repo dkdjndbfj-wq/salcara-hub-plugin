@@ -20,7 +20,7 @@ type feedFixture struct {
 }
 
 func validPayload() payload {
-	return payload{Version: "0.4.1", LauncherProtocol: 1, DataSchema: 1, ReleaseNotes: "Standalone Hub test release", Binaries: map[string]binary{
+	return payload{Product: "salcara-hub-standalone", Version: "0.4.1", LauncherProtocol: 1, DataSchema: 1, ReleaseNotes: "Standalone Hub test release", Binaries: map[string]binary{
 		"linux/amd64": {URL: "https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases/download/v0.4.1/salcara-hub_0.4.1_linux_amd64", SHA256: strings.Repeat("a", 64), SizeBytes: 1024},
 		"linux/arm64": {URL: "https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases/download/v0.4.1/salcara-hub_0.4.1_linux_arm64", SHA256: strings.Repeat("b", 64), SizeBytes: 2048},
 	}}
@@ -130,6 +130,7 @@ func TestSignerRejectsMismatchedAndMalformedPrivateKeysWithoutDisclosingContents
 
 func TestPayloadStrictSchemaAndLimits(t *testing.T) {
 	for _, mutate := range []func(*payload){
+		func(p *payload) { p.Product = "" }, func(p *payload) { p.Product = "salcara-personal-hub" }, func(p *payload) { p.Product = "salcara-hub-plugin" },
 		func(p *payload) { p.Version = "v0.4.1" }, func(p *payload) { p.Version = "01.4.1" }, func(p *payload) { p.Version = "0.4.1-01" }, func(p *payload) { p.Version = "0.4.1.." },
 		func(p *payload) { p.Version = "0.4.1+unsupported-build" }, func(p *payload) { p.Version = "4294967296.1.1" }, func(p *payload) { p.Version = "0.4.1-18446744073709551616" },
 		func(p *payload) { p.LauncherProtocol = 2 }, func(p *payload) { p.DataSchema = 2 }, func(p *payload) { p.ReleaseNotes = strings.Repeat("x", 4097) },

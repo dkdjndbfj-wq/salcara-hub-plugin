@@ -11,7 +11,7 @@ import (
 )
 
 // Version is reported by GET /v1/ping.
-const Version = "1.4.0"
+const Version = "1.5.0"
 
 // Protocol limits.
 const (
@@ -59,6 +59,11 @@ type Config struct {
 	// templates instead of guessing from Host / X-Forwarded-* headers.
 	PublicURL string
 
+	// CleanupUnpairedDays / CleanupPairedDays remove offline, unbanned computers
+	// not seen for that many days (0 = never). Standalone loads saved settings.
+	CleanupUnpairedDays int
+	CleanupPairedDays   int
+
 	CommandTimeout time.Duration // how long /app/commands waits for /bridge/reply (45s)
 	AuthTimeout    time.Duration // sub2api /v1/usage request timeout (5s)
 	ValidTTL       time.Duration // cache for valid keys (10m)
@@ -67,11 +72,20 @@ type Config struct {
 	AuthFailLimit  int           // failed auth attempts per IP per AuthFailWindow (20)
 	AuthFailWindow time.Duration // (1m)
 
+	// FCMCredentials is a Firebase service-account key (JSON). Empty disables push notifications.
+	FCMCredentials []byte
+
 	HTTPClient *http.Client
 	Logger     *slog.Logger
 }
 
 func (c *Config) setDefaults() {
+	if !validCleanupDays(c.CleanupUnpairedDays) {
+		c.CleanupUnpairedDays = 0
+	}
+	if !validCleanupDays(c.CleanupPairedDays) {
+		c.CleanupPairedDays = 0
+	}
 	c.Sub2APIURL = strings.TrimRight(c.Sub2APIURL, "/")
 	c.PublicURL = strings.TrimRight(strings.TrimSpace(c.PublicURL), "/")
 	if c.Prefix == "" {

@@ -18,10 +18,6 @@ func deviceAccount(id string) string {
 
 func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ string) {
 	ip := clientIP(r, h.cfg.TrustProxy)
-	if h.limiter.blocked(ip) {
-		writeError(w, 429, "身份验证失败次数过多，请稍后重试")
-		return
-	}
 	var info Device
 	if !decodeBody(w, r, maxDeviceBody, &info) {
 		return
@@ -42,6 +38,13 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 	h.mu.Lock()
 	a := h.accounts[accountID]
 	exists := a != nil && a.devices[info.DeviceID] != nil
+	// A computer that proves its existing secret is never locked out by other
+	// clients' failures behind the same address; everyone else is rate limited.
+	if !(exists && matchesDeviceSecret(a.devices[info.DeviceID], r)) && h.limiter.blocked(ip) {
+		h.mu.Unlock()
+		writeError(w, 429, "身份验证失败次数过多，请稍后重试")
+		return
+	}
 	if exists && !matchesDeviceSecret(a.devices[info.DeviceID], r) {
 		h.mu.Unlock()
 		h.limiter.fail(ip)
@@ -58,10 +61,15 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 	}
 	// Commit the first secret under the same lock as the existence check. An
 	// empty reservation followed by a second handler permits enrollment races.
-	st, status := h.registerDeviceLocked(accountID, info, secretHash)
+	st, status, deferred := h.registerDeviceLocked(accountID, info, secretHash)
 	h.mu.Unlock()
 	if status != 0 {
 		writeError(w, status, "电脑身份验证失败或本站设备容量已满")
+		return
+	}
+	if deferred {
+		h.log.Warn("device metadata update deferred: site metadata budget full", "account", accountID, "deviceId", info.DeviceID)
+		writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st, "metadataDeferred": true})
 		return
 	}
 	h.markDirty()
@@ -75,45 +83,74 @@ func validDeviceInfo(info Device) bool {
 
 // registerDeviceLocked is shared by legacy and device-only enrollment. Caller
 // holds h.mu. Authentication and capacity checks never create orphan accounts.
-func (h *Hub) registerDeviceLocked(acct string, info Device, secretHash [32]byte) (DeviceStatus, int) {
+func (h *Hub) registerDeviceLocked(acct string, info Device, secretHash [32]byte) (DeviceStatus, int, bool) {
 	if h.bannedDeviceIDs[info.DeviceID] {
-		return DeviceStatus{}, 403
+		return DeviceStatus{}, 403, false
 	}
 	a := h.accounts[acct]
 	if a == nil && len(h.accounts) >= maxDeviceAccounts {
-		return DeviceStatus{}, 429
+		return DeviceStatus{}, 429, false
 	}
 	if a != nil {
 		if dev := a.devices[info.DeviceID]; dev != nil && dev.banned {
-			return DeviceStatus{}, 403
+			return DeviceStatus{}, 403, false
 		}
 		if dev := a.devices[info.DeviceID]; dev != nil && dev.hasSecret &&
 			subtle.ConstantTimeCompare(dev.secretHash[:], secretHash[:]) != 1 {
-			return DeviceStatus{}, 403
+			return DeviceStatus{}, 403, false
 		}
 		if a.devices[info.DeviceID] == nil && len(a.devices) >= maxDevices {
-			return DeviceStatus{}, 429
+			return DeviceStatus{}, 429, false
 		}
 	}
+	if info.Name == "" {
+		info.Name = "我的电脑"
+	}
+	info, charge, err := prepareDeviceMetadata(info)
+	if err != nil {
+		return DeviceStatus{}, http.StatusBadRequest, false
+	}
+	projected := h.deviceMetadataBytes + charge
+	if a == nil || !a.metadataCharged {
+		projected += accountMetadataCost(acct)
+	}
+	if a != nil {
+		if old := a.devices[info.DeviceID]; old != nil {
+			projected -= old.metadataBytes
+		}
+	}
+	if projected > h.deviceMetadataLimit {
+		// An already registered, authenticated computer must never be locked out
+		// of its own Hub because its metadata grew (a new project folder, a tool
+		// version string) while the site budget is full: the Bridge re-registers
+		// before every stream connection. Keep its previous metadata and charge
+		// unchanged and let it connect; only brand-new admissions are refused.
+		if a != nil {
+			if old := a.devices[info.DeviceID]; old != nil && old.hasSecret {
+				return old.status(), 0, true
+			}
+		}
+		return DeviceStatus{}, http.StatusTooManyRequests, false
+	}
+	// Capacity is checked before allocating the account or replacing any
+	// identity, metadata, last-seen timestamp, or stream publication.
 	a = h.accountLocked(acct)
+	a.metadataCharged = true
 	dev := a.devices[info.DeviceID]
 	if dev == nil {
 		dev = &device{}
 		a.devices[info.DeviceID] = dev
 	}
-	if info.Name == "" {
-		info.Name = "我的电脑"
-	}
+	h.deviceMetadataBytes = projected
+	dev.metadataBytes = charge
 	dev.info, dev.secretHash, dev.hasSecret, dev.lastSeen = info, secretHash, true, nowMs()
 	a.broadcastDeviceLocked(dev)
-	return dev.status(), 0
+	return dev.status(), 0, false
 }
 
 func (h *Hub) deviceOnlyAuth(w http.ResponseWriter, r *http.Request, path, ip string) (string, bool) {
-	if h.limiter.blocked(ip) {
-		writeError(w, 429, "身份验证失败次数过多")
-		return "", false
-	}
+	// Valid credentials are checked first: failures by someone else behind the
+	// same proxy address must never lock out paired phones and computers.
 	if strings.HasPrefix(path, "/bridge/") {
 		id := r.Header.Get("X-Salcara-Device-Id")
 		accountID := deviceAccount(id)
@@ -136,6 +173,10 @@ func (h *Hub) deviceOnlyAuth(w http.ResponseWriter, r *http.Request, path, ip st
 			}
 		}
 		h.mu.Unlock()
+	}
+	if h.limiter.blocked(ip) {
+		writeError(w, 429, "身份验证失败次数过多")
+		return "", false
 	}
 	h.limiter.fail(ip)
 	writeError(w, 403, "设备凭证或手机绑定已失效，请重新扫码绑定")

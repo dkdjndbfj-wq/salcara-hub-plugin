@@ -27,7 +27,11 @@ func TestMain(m *testing.M) {
 			if os.Getenv("SALCARA_LAUNCHER_TEST_BAD_PID") == "1" {
 				pid = -1
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "service": "salcara-hub", "version": "0.4.0", "pid": pid})
+			product := Product
+			if os.Getenv("SALCARA_LAUNCHER_TEST_WRONG_PRODUCT") == "1" {
+				product = "salcara-personal-hub"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "service": "salcara-hub", "product": product, "version": "0.4.0", "pid": pid})
 		})}
 		go func() {
 			<-ctx.Done()
@@ -110,7 +114,7 @@ func TestRunnerDoesNotMistakeOccupiedPortForNewChild(t *testing.T) {
 	t.Setenv("SALCARA_LAUNCHER_TEST_CHILD", "1")
 	r := testProcessRelease(t)
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "service": "salcara-hub", "version": "0.4.0", "pid": os.Getpid()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "service": "salcara-hub", "product": Product, "version": "0.4.0", "pid": os.Getpid()})
 	}))
 	defer other.Close()
 	runner := &managedRunner{cfg: Config{DataDir: t.TempDir(), Listen: strings.TrimPrefix(other.URL, "http://")}}
@@ -120,5 +124,25 @@ func TestRunnerDoesNotMistakeOccupiedPortForNewChild(t *testing.T) {
 	}
 	if runner.child != nil {
 		t.Fatal("occupied-port failure left an unconfirmed writer")
+	}
+}
+
+func TestRunnerRejectsAnotherProductBeforeFallback(t *testing.T) {
+	t.Setenv("SALCARA_LAUNCHER_TEST_CHILD", "1")
+	t.Setenv("SALCARA_LAUNCHER_TEST_WRONG_PRODUCT", "1")
+	r := testProcessRelease(t)
+	runner := &managedRunner{cfg: Config{DataDir: t.TempDir(), Listen: freeListen(t)}}
+	t.Cleanup(func() { runner.Stop() })
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := runner.Start(ctx, r); err == nil {
+		t.Fatal("accepted another product with the same version and PID")
+	}
+	if runner.child != nil {
+		t.Fatal("wrong product remained live before fallback")
+	}
+	t.Setenv("SALCARA_LAUNCHER_TEST_WRONG_PRODUCT", "0")
+	if err := runner.Start(context.Background(), r); err != nil {
+		t.Fatal("fallback could not start after wrong product stopped", err)
 	}
 }

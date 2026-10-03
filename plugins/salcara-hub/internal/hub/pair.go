@@ -102,6 +102,7 @@ func (h *Hub) pairedDeviceLocked(accountID string, r *http.Request) *device {
 	}
 	dev := a.devices[identity.deviceID]
 	if dev != nil && !dev.banned && dev.hasPair && subtle.ConstantTimeCompare(hash[:], dev.pairHash[:]) == 1 {
+		dev.lastAppSeen = nowMs()
 		return dev
 	}
 	return nil
@@ -246,6 +247,7 @@ func (h *Hub) handlePairRevoke(w http.ResponseWriter, r *http.Request, accountID
 
 func (h *Hub) revokePairLocked(accountID string, dev *device) {
 	h.setPairLocked(accountID, dev, [32]byte{}, false)
+	h.forgetPush(accountID, dev.info.DeviceID)
 	h.deletePairAttemptLocked(pairKey(accountID, dev.info.DeviceID))
 	for sub := range h.accounts[accountID].apps {
 		if sub.deviceID == dev.info.DeviceID {

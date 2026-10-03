@@ -2,9 +2,9 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const apiBase = '../_admin/v1/';
-  let token = '', epoch = 0, offset = 0, total = 0, pending = null, busy = false, updateCandidate = null, updaterConfigured = false, resourceMode = '', modes = [], modeCandidate = null;
+  let token = '', epoch = 0, offset = 0, total = 0, pending = null, busy = false, updateCandidate = null, updaterConfigured = false, resourceMode = '', modes = [], modeCandidate = null, cleanupCandidate = null;
   const controllers = new Set();
-  const names = { ping: '测量', revoke: '撤销绑定', disconnect: '临时断开', ban: '封禁', unban: '解封', 'resource-mode': '切换运行模式' };
+  const names = { ping: '测量', revoke: '撤销绑定', disconnect: '临时断开', ban: '封禁', unban: '解封', 'resource-mode': '切换运行模式', 'device-cleanup': '修改自动清理', 'device-cleanup-run': '自动清理' };
   const limit = 50;
   function note(message, error = false) { $('notice').textContent = message; $('notice').className = `notice${error ? ' error' : ''}`; }
   function text(tag, value, cls = '') { const node = document.createElement(tag); node.textContent = String(value ?? '—'); if (cls) node.className = cls; return node; }
@@ -12,7 +12,7 @@
   function clearData() { for (const id of ['online','registered','paired','running','waiting','pending','banned','errors']) $(id).textContent = '—'; $('devices').replaceChildren(); $('audit').replaceChildren(); }
   function logout(message = '已退出，页面不再保留管理令牌。') {
     token = ''; epoch++; for (const c of controllers) c.abort(); controllers.clear();
-    pending = null; busy = false; updateCandidate = null; updaterConfigured = false; resourceMode = ''; modes = []; modeCandidate = null; if ($('operation').open) $('operation').close(); if ($('update-dialog').open) $('update-dialog').close(); if ($('mode-dialog').open) $('mode-dialog').close();
+    pending = null; busy = false; updateCandidate = null; updaterConfigured = false; resourceMode = ''; modes = []; modeCandidate = null; if ($('operation').open) $('operation').close(); if ($('update-dialog').open) $('update-dialog').close(); if ($('mode-dialog').open) $('mode-dialog').close(); cleanupCandidate = null; if ($('cleanup-dialog').open) $('cleanup-dialog').close(); $('cleanup-current').textContent = '未认证'; $('cleanup-details').textContent = '';
     $('mode-options').replaceChildren(); $('mode-current').textContent = '未认证'; $('mode-details').textContent = '';
     $('admin-token').value = ''; $('login').disabled = false; $('workspace').hidden = true; $('login-panel').hidden = false; clearData(); syncUpdateButtons();
     $('health').textContent = '尚未认证'; $('health').className = 'pill'; note(message);
@@ -39,6 +39,7 @@
     $('health').textContent = 'Hub 已连接'; $('health').className = 'pill ok';
     $('version').textContent = value.standalone_version ? `服务 v${value.standalone_version}` : '独立 Docker 服务';
     renderModes(value);
+    renderCleanup(value);
     $('latency').textContent = stats.latency_samples > 0 ? `Hub ↔ 电脑指令往返均值 ${Number(stats.latency_mean_ms).toFixed(1)} ms，${stats.latency_samples} 次回复样本。不是手机全链路延迟。` : '尚未测量 Hub ↔ 电脑指令往返；可对在线设备点击“测量”。';
     total = Number(value.total || 0); offset = Number(value.offset || 0);
     const rows = $('devices'); rows.replaceChildren();
@@ -54,7 +55,7 @@
     if (!rows.children.length) { const tr = document.createElement('tr'), td = text('td', '没有匹配设备'); td.colSpan = 5; tr.append(td); rows.append(tr); }
     $('page').textContent = `${total} 台匹配设备 · ${total ? offset+1 : 0}–${Math.min(offset+limit,total)}`; $('prev').disabled = offset <= 0; $('next').disabled = offset+limit >= total;
     const audit = $('audit'); audit.replaceChildren();
-    for (const a of [...(value.audit || [])].reverse()) { const subject = a.device_ref ? `${String(a.device_ref).slice(0,12)}…` : '服务策略'; const reason = a.action === 'resource-mode' ? modes.find(p => p.id === a.reason)?.label || a.reason : a.reason || '测量连接'; audit.append(text('p', `${moment(a.at)} · ${a.actor === 'standalone-admin' ? '独立 Hub 管理员' : '宿主管理员'} · ${names[a.action] || a.action} · ${subject} · ${reason}`)); }
+    for (const a of [...(value.audit || [])].reverse()) { const subject = a.device_ref ? `${String(a.device_ref).slice(0,12)}…` : '服务策略'; const reason = a.action === 'resource-mode' ? modes.find(p => p.id === a.reason)?.label || a.reason : a.reason || '测量连接'; audit.append(text('p', `${moment(a.at)} · ${a.actor === 'standalone-admin' ? '独立 Hub 管理员' : a.actor === 'hub' ? '自动任务' : '宿主管理员'} · ${names[a.action] || a.action} · ${subject} · ${reason}`)); }
     if (!audit.children.length) audit.append(text('p', '暂无管理操作。', 'muted'));
     updaterConfigured = Boolean(value.update_configured);
     if (!updateCandidate) $('update-status').textContent = updaterConfigured ? '已启用同容器签名程序更新；手动检查时才访问发布源。' : '当前由 Hub 单程序启动，没有连接签名更新组件。请使用配套 Docker 启动器，或按部署说明手动更新。';
@@ -81,7 +82,7 @@
     $('update-status').textContent = `${labels[value.status] || '更新状态待确认'}${value.current_version ? ` · 当前 ${value.current_version}` : ''}${value.latest_version ? ` · 发布 ${value.latest_version}` : ''}${value.message ? `。${value.message}` : ''}${value.release_notes ? `\n${value.release_notes}` : ''}`;
     $('install-update').disabled = !updateCandidate || busy; $('check-update').disabled = !updaterConfigured || busy; $('update-result').disabled = !updaterConfigured || busy;
   }
-  function syncUpdateButtons() { $('check-update').disabled = !updaterConfigured || busy; $('update-result').disabled = !updaterConfigured || busy; $('install-update').disabled = !updateCandidate || busy; for (const button of $('mode-options').children) button.disabled = busy || button.dataset.mode === resourceMode; }
+  function syncUpdateButtons() { $('check-update').disabled = !updaterConfigured || busy; $('update-result').disabled = !updaterConfigured || busy; $('install-update').disabled = !updateCandidate || busy; for (const button of $('mode-options').children) button.disabled = busy || button.dataset.mode === resourceMode; for (const id of ['cleanup-save','cleanup-run','cleanup-unpaired','cleanup-paired']) $(id).disabled = busy || !token; }
   function renderModes(value) {
     resourceMode = typeof value.resource_mode === 'string' ? value.resource_mode : '';
     modes = Array.isArray(value.resource_modes) ? value.resource_modes.filter(p => p && ['economy','balanced','performance'].includes(p.id)) : [];
@@ -97,6 +98,41 @@
     }
     $('mode-details').textContent = current ? `当前策略：每个设备账户最多缓存 ${Number(current.account_events)} 条事件 / 每个会话 ${Number(current.session_events)} 条${current.global_event_cache_bytes ? `；全站事件缓存预算 ${Number(current.global_event_cache_bytes) / 1048576} MiB` : ''}；手机流连接上限 ${Number(current.max_app_streams)} 个 / 账户${current.max_global_app_streams ? `、${Number(current.max_global_app_streams)} 个 / 全站` : ''}；Hub 待处理指令上限 ${Number(current.max_pending_commands)} 条。实际容量还取决于消息大小与服务器条件。` : '请确认已运行支持三种资源模式的独立 Hub 版本。';
   }
+  function cleanupDays(days, label) { return Number(days) > 0 ? `${label}离线超过 ${Number(days)} 天清理` : `${label}不清理`; }
+  function renderCleanup(value) {
+    const c = value.device_cleanup;
+    if (!c || typeof c !== 'object') { $('cleanup-current').textContent = '设置不可用'; return; }
+    const on = Number(c.unpaired_days) > 0 || Number(c.paired_days) > 0;
+    $('cleanup-current').textContent = on ? '已开启' : '已关闭'; $('cleanup-current').className = on ? 'pill ok' : 'pill';
+    if (document.activeElement !== $('cleanup-unpaired')) $('cleanup-unpaired').value = String(Number(c.unpaired_days) || 0);
+    if (document.activeElement !== $('cleanup-paired')) $('cleanup-paired').value = String(Number(c.paired_days) || 0);
+    $('cleanup-details').textContent = `${cleanupDays(c.unpaired_days, '未配对电脑')}；${cleanupDays(c.paired_days, '已配对电脑')}。上次检查：${moment(c.last_run_at)}${Number(c.last_run_at) > 0 ? `，清理 ${Number(c.last_removed) || 0} 台` : ''}。`;
+    syncUpdateButtons();
+  }
+  function readDays(id) { const raw = $(id).value.trim(); const n = Number(raw); return raw !== '' && Number.isInteger(n) && n >= 0 && n <= 3650 ? n : null; }
+  $('cleanup-form').addEventListener('submit', event => {
+    event.preventDefault(); if (busy) return;
+    const unpaired = readDays('cleanup-unpaired'), paired = readDays('cleanup-paired');
+    if (unpaired === null || paired === null) { note('清理天数需为 0 到 3650 之间的整数，0 表示不清理。', true); return; }
+    cleanupCandidate = { unpaired_days: unpaired, paired_days: paired, confirm: true };
+    $('cleanup-dialog-title').textContent = '保存自动清理设置';
+    $('cleanup-target').textContent = `${cleanupDays(unpaired, '未配对电脑')}；${cleanupDays(paired, '已配对电脑')}。保存后会立即按新规则检查一次${paired > 0 ? '；被清理的已配对电脑需要在手机上重新扫码' : ''}。`;
+    $('cleanup-dialog').showModal();
+  });
+  $('cleanup-run').addEventListener('click', () => {
+    if (busy) return; cleanupCandidate = { run_now: true, confirm: true };
+    $('cleanup-dialog-title').textContent = '立即清理一次';
+    $('cleanup-target').textContent = '按当前已保存的规则立即检查并清理不活跃电脑。';
+    $('cleanup-dialog').showModal();
+  });
+  $('cancel-cleanup').addEventListener('click', () => { cleanupCandidate = null; $('cleanup-dialog').close(); });
+  $('cleanup-confirm-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (!cleanupCandidate || busy) return;
+    const generation = epoch, target = cleanupCandidate; cleanupCandidate = null; busy = true; $('cleanup-dialog').close(); syncUpdateButtons(); note('正在处理清理设置；不会自动重试。');
+    try { const value = await request('device-cleanup', 'POST', target); await refresh(); if (generation === epoch) note(`${target.run_now ? '清理完成' : '清理设置已保存并生效'}，本次清理 ${Number(value.removed) || 0} 台电脑。${value.durability_warning ? '配置同步未完成，断电后请重新确认设置。' : ''}`, Boolean(value.durability_warning)); }
+    catch (error) { if (generation === epoch) note(`${error.message} 请刷新确认实际设置，不要直接重复提交。`, true); }
+    finally { if (generation === epoch) { busy = false; syncUpdateButtons(); } }
+  });
   $('cancel-mode').addEventListener('click', () => { modeCandidate = null; $('mode-dialog').close(); });
   $('mode-form').addEventListener('submit', async event => {
     event.preventDefault(); if (!modeCandidate || busy || !modes.some(p => p.id === modeCandidate)) return;

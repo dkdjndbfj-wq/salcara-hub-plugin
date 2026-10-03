@@ -398,3 +398,43 @@ func TestShutdownRejectsNewEnrollmentAndDoesNotWriteCredentialsToLogs(t *testing
 		t.Fatal("closed Hub accepted new namespace")
 	}
 }
+
+// Behind one proxy address, someone else's bad guesses must never lock out a
+// computer that proves its secret or a phone holding a valid pairing token.
+func TestFailuresBehindSharedAddressNeverLockOutValidCredentials(t *testing.T) {
+	h := newDeviceHub(t, Config{AuthFailLimit: 3})
+	secret := strings.Repeat("a", 64)
+	enrollDevice(t, h, "pc-shared", secret)
+	onlineDevice(t, h, "pc-shared")
+	token := claimQR(t, h, "pc-shared", issueQR(t, h, "pc-shared", secret))
+	for i := 0; i < 5; i++ {
+		deviceRequest(t, h, "/app/devices", "", "", strings.Repeat("0", 64), nil, "192.0.2.1")
+	}
+	if w := deviceRequest(t, h, "/app/devices", "", "", strings.Repeat("0", 64), nil, "192.0.2.1"); w.Code != 429 {
+		t.Fatalf("guessing not limited: %d", w.Code)
+	}
+	if w := deviceRequest(t, h, "/app/devices", "", "", token, nil, "192.0.2.1"); w.Code != 200 {
+		t.Fatalf("paired phone locked out by others: %d %s", w.Code, w.Body)
+	}
+	if w := deviceRequest(t, h, "/device/register", "pc-shared", secret, "", Device{DeviceID: "pc-shared"}, "192.0.2.1"); w.Code != 200 {
+		t.Fatalf("enrolled computer locked out by others: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestFailLimiterGroupsIPv6AndNeverBlocksEveryoneWhenFull(t *testing.T) {
+	l := newFailLimiter(2, time.Minute)
+	l.fail("2001:db8::1")
+	l.fail("2001:db8::ffff")
+	if !l.blocked("2001:db8::abcd") {
+		t.Fatal("one /64 must share a failure budget")
+	}
+	if l.blocked("2001:db8:1::1") || l.blocked("192.0.2.9") {
+		t.Fatal("other networks blocked")
+	}
+	for i := 0; i < 65536; i++ {
+		l.m[fmt.Sprintf("filler-%d", i)] = &failWindow{start: time.Now(), count: 1}
+	}
+	if l.blocked("198.51.100.7") {
+		t.Fatal("a full table must not block unknown clients")
+	}
+}

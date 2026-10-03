@@ -3,6 +3,7 @@
 FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS build
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG VERSION=0.4.0-dev
 WORKDIR /src
 COPY deploy/standalone/go.mod ./go.mod
 COPY plugins/salcara-hub/internal/hub ./internal/hub
@@ -12,9 +13,9 @@ COPY plugins/salcara-hub/cmd/hub ./cmd/hub
 COPY plugins/salcara-hub/cmd/hub-launcher ./cmd/hub-launcher
 ENV GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0
 RUN go test ./... && go vet ./...
-RUN CGO_ENABLED=1 go test -race ./internal/launcher ./internal/standalone
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w -buildid=' -o /out/salcara-hub ./cmd/hub
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w -buildid=' -o /out/salcara-hub-launcher ./cmd/hub-launcher
+RUN CGO_ENABLED=1 go test -race ./...
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -buildid= -X salcara/hubplugin/internal/standalone.Version=$VERSION" -o /out/salcara-hub ./cmd/hub
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -buildid= -X salcara/hubplugin/internal/standalone.Version=$VERSION" -o /out/salcara-hub-launcher ./cmd/hub-launcher
 RUN mkdir -p /runtime/data && chmod 0700 /runtime/data && chown 65532:65532 /runtime/data
 
 FROM scratch AS binary-export
@@ -22,9 +23,11 @@ COPY --from=build /out/salcara-hub /salcara-hub
 COPY --from=build /out/salcara-hub-launcher /salcara-hub-launcher
 
 FROM scratch AS runtime
+ARG VERSION=0.4.0-dev
 LABEL org.opencontainers.image.title="Salcara Hub standalone" \
       org.opencontainers.image.description="Independent device pairing and remote message relay; no model API key required" \
       org.opencontainers.image.source="https://github.com/dkdjndbfj-wq/salcara-hub-plugin" \
+      org.opencontainers.image.version="$VERSION" \
       org.opencontainers.image.licenses="LGPL-3.0"
 COPY --from=build /out/salcara-hub /salcara-hub
 COPY --from=build /out/salcara-hub-launcher /salcara-hub-launcher

@@ -145,17 +145,19 @@ type bridgeConn struct {
 func (c *bridgeConn) close() { c.once.Do(func() { close(c.closed) }) }
 
 type device struct {
-	info       Device
-	lastSeen   int64
-	conn       *bridgeConn // nil while offline
-	secretHash [32]byte
-	hasSecret  bool
-	pairHash   [32]byte
-	hasPair    bool
-	banned     bool
-	banReason  string
-	bannedAt   int64
-	latency    latencyState
+	metadataBytes int64 // conservative retained/decoded metadata charge, guarded by Hub.mu
+	info          Device
+	lastSeen      int64
+	conn          *bridgeConn // nil while offline
+	secretHash    [32]byte
+	hasSecret     bool
+	pairHash      [32]byte
+	hasPair       bool
+	lastAppSeen   int64 // last request from the paired phone (memory only); push waits while it is active
+	banned        bool
+	banReason     string
+	bannedAt      int64
+	latency       latencyState
 }
 
 func (d *device) status() DeviceStatus {
@@ -173,6 +175,7 @@ func (d *device) status() DeviceStatus {
 }
 
 type account struct {
+	metadataCharged       bool // account map/identity reserve is charged only once
 	owner                 *Hub
 	cacheBytes            int64
 	cacheEntry            *list.Element
@@ -184,6 +187,17 @@ type account struct {
 	events                *ring
 	sessions              map[string]*sessionBuf
 	apps                  map[*appSub]struct{}
+	// wake is closed (and replaced) whenever an event is appended, waking
+	// phones long-polling /app/events. Lazily created under h.mu.
+	wake chan struct{}
+}
+
+// wakeChanLocked returns the channel closed by the next appended event.
+func (a *account) wakeChanLocked() chan struct{} {
+	if a.wake == nil {
+		a.wake = make(chan struct{})
+	}
+	return a.wake
 }
 
 func sessionID(deviceID, sessionKey string) string { return deviceID + "\x00" + sessionKey }
@@ -278,6 +292,10 @@ func (a *account) appendEventLocked(deviceID string, fields map[string]json.RawM
 	a.seq = seq
 	e := &storedEvent{seq: seq, deviceID: deviceID, sessionKey: sk, data: data}
 	a.events.push(e)
+	if a.wake != nil {
+		close(a.wake)
+		a.wake = nil
+	}
 	if sk != "" {
 		id := sessionID(deviceID, sk)
 		sb := a.sessions[id]

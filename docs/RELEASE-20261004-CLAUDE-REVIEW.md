@@ -1,0 +1,62 @@
+# 2026-10-04 中转站 Docker 发布及自动更新交接
+
+## 本次范围与基线
+
+- 工作目录：`work/salcara-hub-release-20261004`，独立复制，不修改 Claude 工作目录或旧 `salcara-hub-plugin-github` dirty checkout。
+- Git 基线：旧公开仓库 commit `7ce737f`。Hub 最新 `cmd/`、`internal/` 及源码 `compose.yml` 取自 `salcara-phone-dialog-review/output/docker-kernel-review`，包含 Claude 已完成的设备容量、自动清理和 FCM 推送改动；不重新设计或修改它们。
+- 不发布、不修改个人版。原插件已发布 `v0.3.1`、插件 ID、宿主补丁和插件更新源保留。本次独立 Docker tag 为 `standalone-v0.4.0`。
+- 手机、桌面界面及动效不在本次 Docker工作范围。
+
+## 自动更新补全
+
+1. **产品绑定**：`internal/launcher/{config,feed}.go` 在签名 payload 中要求 `product:"salcara-hub-standalone"`。即使公钥相同，个人版、插件或缺失产品的 feed 仍被拒绝；增加 `product_test.go` 回归。此源之前未正式发布，不兼容手工生成的不含 product 的私人旧 feed。
+2. **执行后检查**：`internal/launcher/process_linux.go` 与 `internal/standalone/{config,server}.go` 添加并要求健康响应的精确 product；原 PID、版本和健康验证继续保留。新增 Linux 子进程测试验证产品错误时先停止错误子进程再允许旧版恢复。
+3. **签名工具一致性**：`tools/standalone-feed/{main,main_test}.go` 要求六个精确公开字段及 standalone product；原外部私钥边界、身份匹配、签名、大小、哈希、版本、URL 和不覆盖输出约束保留。未查看、打印、提交或上传真实私钥。
+4. **版本一致性**：Dockerfile 增加 VERSION 构建参数，同时写入 Hub、launcher 的编译版本及 OCI version label；否则正式 0.4.0 清单和实际 `0.4.0-dev` 健康响应会不一致。把 builder race 覆盖扩大为 `./...`，包括 Claude 最新 Hub。
+5. **可发布链路**：新增 `standalone-release.yml`，默认只构建验证。amd64 真实容器 smoke 通过后导出两架构原始二进制；`publish_image=true` 才推固定版本 GHCR，不推 `latest`。CI 无私钥 Secret、无生产部署、无原插件/个人版 release。
+6. **公开产物准备与独立验证**：`release-stage.mjs` 验证 Linux ELF64 及机器架构，生成真实大小、SHA-256、standalone tag 的 URL 与未签名 payload；`verify-release.mjs` 只读公钥、签名和二进制，核验固定发布者及产品/版本/大小/哈希。不得把未签名 payload 当更新源。
+7. **部署配置**：新增独立替代的 `compose.release.yml`，固定正式镜像版本，保留现有项目及 `hub-data` 卷。不能同时使用源码/正式 Compose 启动两个写入者。`-init` 仅新卷一次；升级不清空数据、不用 `down -v`。
+
+## 保留的界面和安全链路
+
+对 Claude 最新 `cmd/`、`internal/` 作规范化换行比较：62 个基线文件中 55 个未变，只有 7 个自动更新产品绑定相关文件改动（其中 2 个是测试）；另新增 1 个测试文件。全部 6 个 `internal/standalone/web/*` 文件逐内容与 Claude 完成版一致，本次未改 Docker UI。
+
+管理页仍调用 `/_admin/v1/update/{status,check,apply}`；Server 路由和独立 Bearer 管理鉴权仍生效；子 Hub 通过私有 Unix socket / 临时控制 token 调用同容器 launcher。默认固定 feed 是 `main/updates/standalone.json`，更新未被默认禁用，启动器的公钥与 `publisher/public.json` 一致。
+
+这是一键确认的应用更新，不是无用户确认的静默升级，也不是 Docker daemon 自动更换容器。`/status` 不联网；点击检查才联网。接受 202 不是完成，更新任务受理回执先发送，再下载/验签/校验，验证完成前不停止旧 Hub。健康失败恢复旧程序；数据卷保留。无需 Docker socket 或第二个容器。
+
+## 本地验证结果
+
+- Node 管理页与公开 release preparation / verification 回归：最终 **14 项通过、0 失败、0 跳过**，包含新增的公钥身份不匹配和未签名 envelope 拒绝测试。
+- 两份 Compose 的 `config --quiet` 均成功；使用合成 `relay.example.com` 地址，没有加载真实凭据或服务器配置。
+- Windows 完整 `go test ./... -count=1`：launcher、standalone、签名工具通过；Hub 仅 Claude 新增 `TestPushSendsOneGenericMessagePerNews` 的 POSIX `0600` 权限断言失败，Windows 不实现这些权限位。本次不为了 Windows 改 Linux 运行安全行为。
+- 排除上述一项平台断言后：`go test ./... -count=1 -skip '^TestPushSendsOneGenericMessagePerNews$'` 通过。
+- Windows `go vet ./...` 通过；Linux amd64 与 arm64 交叉 `go vet ./...` 通过。
+- 两架构 Hub 与 launcher 共 4 个交叉编译通过，编译版本 `0.4.0`。这些本地二进制不是 Docker 实机运行证据，不用于替代 CI 的正式产物。
+- `git diff --check` 通过。复制本地快照带来的 SDK / 原插件文件换行差异不属于可提交范围；不能 `git add .` 混入这些路径。
+- 产品拒绝、签名与篡改拒绝、下载中断不停止旧服务、feed 改变拒绝、健康失败回退、重新恢复签名状态、路径 fail-closed 及回执屏障均由现有与新增 launcher / standalone 测试覆盖。
+
+## 尚待公开发布前执行
+
+- 本机 Linux Docker daemon pipe 缺失，尚未本机构建/启动容器，也未本机跑 Linux race。必须运行 GitHub `Standalone release build` 并以真实结果补记。
+- GitHub CI smoke 验证非 root、只读、初始化不得覆盖、health product / version / PID、管理鉴权、资源模式与重启持久化，但不调用真实更新源进行付费/真实签名升级。
+- 正式 signed feed 需要对 **CI 成功的同 commit 产物** 用既有外部签名工具签名，并独立公钥复验；先上传并下载复验两个 Hub asset，再更新 main 的 standalone feed。
+- GHCR 公共可拉取性、Release tag / commit / 二进制、最终远端清单必须再验；不能只看到 Actions 或上传命令成功就认为可升级。
+- arm64 是交叉构建，不是 arm64 实机测试；真实公网 HTTPS、真实手机/电脑授权、FCM 与容量需部署环境验收。
+- 应用回退不等于用户数据回滚；当前拒绝不同 `data_schema`。历史已验证程序保留会占用磁盘，尚无自动清理版本缓存承诺。
+
+## 可提交范围（禁止把其它 dirty checkout 混入）
+
+只 stage 本目录下这些路径：
+
+- `.dockerignore`、`Dockerfile`、`compose.yml`、`compose.release.yml`、`README.md`；
+- `.github/workflows/standalone-docker.yml`、`.github/workflows/standalone-release.yml`；
+- `deploy/standalone/`；
+- `docs/STANDALONE-DOCKER.zh.md`、`docs/STANDALONE-RELEASE.zh.md`、本记录；
+- `plugins/salcara-hub/cmd/hub/`、`plugins/salcara-hub/cmd/hub-launcher/`；
+- `plugins/salcara-hub/internal/hub/`、`plugins/salcara-hub/internal/standalone/`、`plugins/salcara-hub/internal/launcher/`（最新 Claude 内核加本次自动更新改动）；
+- `plugins/salcara-hub/tools/standalone-feed/`。
+
+不要 stage `output/`、宿主补丁、原插件 UI、SDK、个人版、私钥、用户数据、服务器配置。`output/` 全部是临时本地验证，不应上传。
+
+CI/人工步骤见 `STANDALONE-RELEASE.zh.md`。源发布、GHCR image、GitHub Release、signed feed 是四步，不会重启或部署任何生产服务器。

@@ -230,7 +230,7 @@ func (h *Hub) handleReceiptCommand(w http.ResponseWriter, r *http.Request, acct 
 	return true
 }
 func (h *Hub) commandCapabilities() ([]string, int64) {
-	capabilities := []string{"events.cursor.v1"}
+	capabilities := []string{"events.cursor.v1", "events.wait.v1"}
 	if h.receipts != nil && h.receipts.dir != "" {
 		capabilities = append(capabilities, "commands.idempotency.v1")
 	}

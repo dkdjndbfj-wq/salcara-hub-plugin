@@ -1,0 +1,103 @@
+name: Standalone release build
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Bare stable version, matching the standalone release tag
+        required: true
+        default: '0.4.0'
+      publish_image:
+        description: Publish the tested image to GHCR (does not deploy a server)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: standalone-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate isolated standalone release identity
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || exit 1
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: deploy/standalone/go.mod
+          cache: false
+      - name: Test offline public feed signer without a real private key
+        run: |
+          mkdir -p /tmp/standalone-signer/tools
+          cp deploy/standalone/go.mod /tmp/standalone-signer/go.mod
+          cp -a plugins/salcara-hub/tools/standalone-feed /tmp/standalone-signer/tools/
+          cd /tmp/standalone-signer
+          GOTOOLCHAIN=local GOPROXY=off go test ./tools/standalone-feed
+      - name: Validate deployment and preserve Claude's administrator UI
+        env:
+          SALCARA_HUB_PUBLIC_URL: https://relay.example.com/salcara-hub
+        run: |
+          docker compose -f compose.release.yml config --quiet
+          node --test deploy/standalone/admin-ui.test.mjs deploy/standalone/release.test.mjs
+      - name: Build amd64 with Go tests, vet and race checks
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: docker buildx build --platform linux/amd64 --build-arg VERSION="$VERSION" --load --tag salcara-hub-standalone:ci .
+      - name: Run isolated non-root container smoke test
+        run: node deploy/standalone/container-smoke.mjs salcara-hub-standalone:ci
+      - name: Export both architectures from the exact tested source
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          docker buildx build --target binary-export --platform linux/amd64 --build-arg VERSION="$VERSION" --output type=local,dest=/tmp/standalone-release/linux-amd64 .
+          docker buildx build --target binary-export --platform linux/arm64 --build-arg VERSION="$VERSION" --output type=local,dest=/tmp/standalone-release/linux-arm64 .
+          node deploy/standalone/release-stage.mjs /tmp/standalone-release "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standalone-release-${{ steps.version.outputs.value }}
+          path: /tmp/standalone-release/
+          retention-days: 30
+          if-no-files-found: error
+  publish-image:
+    if: ${{ inputs.publish_image }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ needs.build.outputs.version }}
+          tags: ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:${{ needs.build.outputs.version }}
+          provenance: true
+          sbom: true
+      # Signing is offline after artifact verification. No private publisher
+      # secret, production deploy, plugin release or personal release here.

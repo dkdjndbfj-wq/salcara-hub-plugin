@@ -64,6 +64,8 @@ try {
     await sleep(250);
   }
   docker(['exec', container, '/salcara-hub-launcher', '-healthcheck']);
+  const health = await (await request('/healthz')).json();
+  assert.equal(health.product, 'salcara-hub-standalone', 'must not run another edition');
   assert.equal((await request('/salcara-hub/v1/ping')).status, 200);
   assert.equal((await request('/v1/ping')).status, 404, 'must not claim model API /v1');
   const page = await request('/salcara-hub/admin/');
@@ -93,7 +95,8 @@ try {
   const updateStatus = await statusResponse.json();
   assert.equal(updateStatus.configured, true, 'same-container launcher must be configured');
   assert.equal(updateStatus.current_version, state.standalone_version);
-  // Status does not fetch the unpublished public feed. Never apply a real
+  assert.equal(updateStatus.current_version, config.Labels['org.opencontainers.image.version']);
+  // Status does not fetch the public feed. Never apply a real
   // network update or use an operator publisher private key in this smoke.
   const changeMode = async (mode, confirm) => request('/salcara-hub/_admin/v1/resource-mode', {
     method: 'POST', headers: { ...adminHeaders, 'Content-Type': 'application/json' },

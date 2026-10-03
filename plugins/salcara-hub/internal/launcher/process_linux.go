@@ -123,12 +123,13 @@ func (p *managedRunner) waitHealthy(ctx context.Context, child *managedChild, ve
 			var state struct {
 				OK      bool   `json:"ok"`
 				Service string `json:"service"`
+				Product string `json:"product"`
 				Version string `json:"version"`
 				PID     int    `json:"pid"`
 			}
 			e = json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&state)
 			res.Body.Close()
-			if e == nil && res.StatusCode == 200 && state.OK && state.Service == "salcara-hub" && state.Version == version && state.PID == child.cmd.Process.Pid {
+			if e == nil && res.StatusCode == 200 && state.OK && state.Service == "salcara-hub" && state.Product == Product && state.Version == version && state.PID == child.cmd.Process.Pid {
 				select {
 				case <-child.done:
 					return errors.New("Hub exited before health acceptance")

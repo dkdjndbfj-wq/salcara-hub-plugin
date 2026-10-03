@@ -18,11 +18,28 @@ services:
       SALCARA_HUB_DATA_DIR: /data
       SALCARA_HUB_ADMIN_TOKEN_FILE: /data/admin-token
       SALCARA_HUB_PUBLIC_URL: "${SALCARA_HUB_PUBLIC_URL:?Set the HTTPS site URL ending in /salcara-hub}"
+      # The port below is published on 127.0.0.1 only, so the host Nginx is the
+      # sole client. Its X-Forwarded-For ($remote_addr) gives per-client rate
+      # limits; without it every visitor shares one address and a few bad
+      # guesses would lock everyone out.
+      SALCARA_HUB_TRUST_PROXY: "true"
+      # Inactive computers are removed after this many days offline (0 = never).
+      # Unpaired ones simply re-register; paired ones must be scanned again.
+      # The admin page can change both later; its saved choice wins.
+      SALCARA_HUB_CLEANUP_UNPAIRED_DAYS: "7"
+      SALCARA_HUB_CLEANUP_PAIRED_DAYS: "0"
+      # Push notifications to paired phones when the app is closed (Firebase Cloud Messaging).
+      # Put the Firebase service-account key at ./secrets/fcm-service-account.json, readable only by
+      # the Hub's user: `sudo chown 65532:65532 secrets/fcm-service-account.json && sudo chmod 600 secrets/fcm-service-account.json`,
+      # then uncomment this line and the matching volume below. Without it, phones use their own
+      # background connection instead.
+      # SALCARA_HUB_FCM_CREDENTIALS_FILE: /run/secrets/fcm-service-account.json
       # Parent launcher only; the supervised Hub sets its own soft target.
       GOMEMLIMIT: 32MiB
       GOMAXPROCS: "2"
     volumes:
       - hub-data:/data
+      # - ./secrets/fcm-service-account.json:/run/secrets/fcm-service-account.json:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
     mem_limit: 384m

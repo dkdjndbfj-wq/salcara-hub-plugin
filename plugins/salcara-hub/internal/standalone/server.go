@@ -68,15 +68,30 @@ func New(cfg Config, logger *slog.Logger) (*Server, error) {
 		lock.release()
 		return nil, err
 	}
+	cleanup, err := loadDeviceCleanup(cfg.DataDir, cleanupSetting{UnpairedDays: cfg.CleanupUnpairedDays, PairedDays: cfg.CleanupPairedDays})
+	if err != nil {
+		lock.release()
+		return nil, err
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h, err := hub.New(hub.Config{DataDir: cfg.DataDir, Prefix: Prefix, PublicURL: cfg.PublicURL,
-		ResourceMode:   mode,
+	fcm, err := readFCMCredentials(cfg.FCMCredentialsFile)
+	if err != nil {
+		lock.release()
+		return nil, err
+	}
+	h, err := hub.New(hub.Config{DataDir: cfg.DataDir, Prefix: Prefix, PublicURL: cfg.PublicURL, TrustProxy: cfg.TrustProxy,
+		FCMCredentials:      fcm,
+		ResourceMode:        mode,
+		CleanupUnpairedDays: cleanup.UnpairedDays, CleanupPairedDays: cleanup.PairedDays,
 		CommandTimeout: cfg.CommandTimeout, PingInterval: cfg.PingInterval,
 		DisableLegacyAPIKey: true, Logger: logger})
 	if err != nil {
 		lock.release()
+		if len(fcm) > 0 && strings.Contains(err.Error(), "FCM") {
+			return nil, err
+		}
 		return nil, errors.New("cannot load Hub pairing data; inspect the persistent volume before restarting")
 	}
 	preset, _ := hub.ResourceMode(mode)
@@ -134,7 +149,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// PID is an operational identity, never an authentication credential.
 		// The same-container launcher checks it against the exact child PID so
 		// another Hub already occupying the port cannot satisfy this probe.
-		respond(w, http.StatusOK, map[string]any{"ok": true, "service": "salcara-hub", "version": Version, "pid": os.Getpid()})
+		respond(w, http.StatusOK, map[string]any{"ok": true, "service": "salcara-hub", "product": Product, "version": Version, "pid": os.Getpid()})
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, Prefix+"/v1/") {
@@ -321,6 +336,7 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		state["resource_mode"] = s.hub.CurrentResourceMode().ID
 		state["resource_modes"] = hub.ResourceModes()
 		state["resource_scope"] = resourceScope
+		state["device_cleanup"] = s.hub.CurrentDeviceCleanup()
 		state["memory_limit_kind"] = "Go soft target; not RSS or hard guarantee"
 		respond(w, http.StatusOK, state)
 	case Prefix + "/_admin/v1/action":
@@ -352,6 +368,8 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		s.serveUpdate(w, r)
 	case Prefix + "/_admin/v1/resource-mode":
 		s.serveResourceMode(w, r)
+	case Prefix + "/_admin/v1/device-cleanup":
+		s.serveDeviceCleanup(w, r)
 	default:
 		failure(w, http.StatusNotFound, "管理接口不存在")
 	}

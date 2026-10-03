@@ -21,7 +21,22 @@ HTTPS 保护传输，但当前不是端到端加密；站点运营者能读取�
 
 需要可用的 Docker Engine、Compose 插件，以及现有 HTTPS 反向代理。请先在测试环境验证并备份。以下只创建独立 Hub，不替换、停止或更新 Sub2API。
 
-本仓库提供从源码构建方式；**尚未提供可直接拉取的正式 GHCR 镜像**。同一个容器已经包含轻量启动器，可以在管理页检查并一键更新 **Hub 应用程序**；不会替换 Docker 镜像、启动器或操作服务器上的其它容器。公开签名应用更新源尚未发布时，检查会显示“更新源尚未发布或暂时不可用”，原应用继续运行。不要使用猜测的镜像名，也不要把插件 Release 的 `update.json` 当作应用或镜像更新源。
+本仓库提供源码构建和 [正式镜像配置](../compose.release.yml) 两种替代方式，不能叠加或同时启动。正式 GHCR 镜像地址为 `ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:版本号`，只使用已经出现在 `standalone-v版本号` Release 中的版本，缺少 Release 或镜像拉取失败时不能认为发布已完成。同一个容器已经包含轻量启动器，可以在管理页检查并一键更新 **Hub 应用程序**；不会替换 Docker 镜像、启动器或操作服务器上的其它容器。签名源不可达时原应用继续运行。不要把插件 Release 的 `update.json` 当作应用或镜像更新源。
+
+正式镜像首次安装（Release 确认可用后）：
+
+```sh
+export SALCARA_HUB_PUBLIC_URL=https://你的中转站域名/salcara-hub
+export SALCARA_HUB_IMAGE_VERSION=0.4.0
+docker compose -f compose.release.yml config --quiet
+docker compose -f compose.release.yml pull hub
+# 新卷只执行一次。已安装的卷不能重新初始化。
+docker compose -f compose.release.yml run --rm --no-deps hub -init
+docker compose -f compose.release.yml up -d --no-deps hub
+docker compose -f compose.release.yml ps
+```
+
+下面保留源码构建流程。使用正式配置时，后续每条 Compose 命令也必须带 `-f compose.release.yml`，避免误切回源码镜像。两份配置固定同一个项目名及卷名，使已有源码部署可保留 `hub-data` 转为正式镜像；转换前先备份、检查最终卷名称，不能执行 `down -v`。
 
 ```sh
 git clone https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git
@@ -98,10 +113,10 @@ Docker 不会让服务不占内存，也不是每个容器都需要运行一套�
 
 同容器启动器按以下顺序处理：
 
-1. 重新获取固定更新源，核对你确认的版本和 SHA-256，验证固定发布者 Ed25519 签名、启动协议 1、数据格式 1；单更新源最多 64KiB，单二进制最多 64MiB。
+1. 重新获取固定更新源，核对你确认的版本和 SHA-256，验证固定发布者 Ed25519 签名、产品 `salcara-hub-standalone`、启动协议 1、数据格式 1；个人版或插件清单即使由同一个发布者签名也拒绝。单更新源最多 64KiB，单二进制最多 64MiB。
 2. 下载对应 Linux 架构的 Hub 二进制，逐字节核验大小和哈希，保存原始签名清单。**全部校验完成前不停止现有 Hub。** 下载流式写盘，不把 64MiB 整包当作常驻内存缓存。
 3. 优雅停止子 Hub，确认旧进程退出后，执行已打开且再次验证的程序文件；不执行 shell、不接受任意路径、Docker 命令或镜像地址。
-4. 核验新进程自己的 PID、版本和健康响应。通过后原子提交确认记录；健康失败时先确认失败进程停止，再启动原已验证程序。无法确认停止则拒绝启动第二个数据写入者。
+4. 核验新进程自己的 PID、产品、版本和健康响应。通过后原子提交确认记录；健康失败时先确认失败进程停止，再启动原已验证程序。无法确认停止则拒绝启动第二个数据写入者。
 
 数据卷与独立管理令牌保留，启动器自身、Docker 镜像与 Sub2API 不变；只重启 Hub 应用会短暂中断远程连接与在途请求。自动回退指**程序**，不是数据库或用户数据回滚。当前仅接受 `launcher_protocol=1`、`data_schema=1`，拒绝不同数据格式的新版本；发布者必须遵守同数据格式兼容约定。有迁移需求时须完整备份并走相应镜像升级/迁移流程。
 
@@ -151,3 +166,18 @@ docker compose up -d --no-deps --no-build hub
 CI 成功后提供 `salcara-hub-standalone-development` 测试 artifact（14天）：amd64 Docker archive、arm64 OCI archive、两架构 Hub/启动器二进制及说明。它们是未签名的开发产物，不是正式应用更新源；不要绕过更新器把这些文件放进 `/data/updates`。
 
 Docker CI 成功并不等于目标服务器反代/TLS、真实手机扫码及 Codex / Claude Desktop 续聊验收成功；arm64 交叉编译也不是 arm64 实机运行测试。本地 Docker daemon 未启用时，不会宣称已经在本地构建并运行了容器。构建器使用 [Docker 官方 Go 镜像](https://hub.docker.com/_/golang) 的 `golang:1.27.1-bookworm`，运行阶段为 `scratch`。
+
+## 安全加固（v1.5 Hub）
+
+- **失败限流按真实客户端计算**：Compose 默认 `SALCARA_HUB_TRUST_PROXY=true`，并只在 `127.0.0.1:8787` 发布端口；Nginx 必须用 `proxy_set_header X-Forwarded-For $remote_addr;`（覆盖，不是追加）。旧版配置清空了这个头，所有访客在 Hub 看来都是同一个地址：任何人连续猜错 20 次，全站手机和电脑都会被 429 拒绝一分钟。若站点在 Cloudflare 等 CDN 后面，先配置 `ngx_http_realip_module`。
+- **有效凭据不受他人失败影响**：已配对手机的令牌、已登记电脑的设备密钥先校验，校验通过就放行；只有失败的请求才计入和受限。
+- **IPv6 按 /64 计数**：同一台主机换地址不能绕过限流；失败记录表满时不会再“全部拒绝”。
+- **可选的 Nginx 外层限流**（在 `http {}` 里，按需调整）：
+
+```nginx
+limit_req_zone $binary_remote_addr zone=salcara_hub:10m rate=20r/s;
+# 然后在 location ^~ /salcara-hub/ 里加：
+limit_req zone=salcara_hub burst=60 nodelay;
+```
+
+- **长轮询**：Hub 1.5 支持 `events.wait.v1`（`/app/events?wait=1..25`），手机看对话时由服务器挂起空请求、有新进展立即返回；`proxy_read_timeout 90s` 已足够。

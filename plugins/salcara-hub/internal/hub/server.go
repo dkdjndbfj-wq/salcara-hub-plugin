@@ -18,15 +18,19 @@ import (
 
 // Hub is the HTTP handler and in-memory state of the service.
 type Hub struct {
-	eventCacheBytes int64          // guarded by mu
-	cacheOrder      *list.List     // least recently updated payload cache first, under mu
-	resource        ResourcePreset // guarded by mu, never mutate shared cfg live
-	cfg             Config
-	log             *slog.Logger
-	auth            *authenticator
-	limiter         *failLimiter
-	enrollLimiter   *failLimiter
-	routes          map[string]route
+	push                *pushState     // FCM push to paired phones (push.go); nil-safe
+	deviceMetadataBytes int64          // guarded by mu; includes raw fields and map/identity reserves
+	deviceMetadataLimit int64          // fixed across resource modes; small test fixtures may lower it
+	cleanup             DeviceCleanup  // inactive-computer cleanup policy, guarded by mu
+	eventCacheBytes     int64          // guarded by mu
+	cacheOrder          *list.List     // least recently updated payload cache first, under mu
+	resource            ResourcePreset // guarded by mu, never mutate shared cfg live
+	cfg                 Config
+	log                 *slog.Logger
+	auth                *authenticator
+	limiter             *failLimiter
+	enrollLimiter       *failLimiter
+	routes              map[string]route
 
 	mu              sync.Mutex
 	accounts        map[string]*account
@@ -80,23 +84,25 @@ func New(cfg Config) (*Hub, error) {
 		}
 	}
 	h := &Hub{
-		cacheOrder:      list.New(),
-		resource:        resource,
-		cfg:             cfg,
-		log:             cfg.Logger,
-		auth:            newAuthenticator(&cfg),
-		limiter:         newFailLimiter(cfg.AuthFailLimit, cfg.AuthFailWindow),
-		enrollLimiter:   newFailLimiter(10, time.Minute),
-		accounts:        map[string]*account{},
-		pending:         map[string]*pendingCmd{},
-		pairCodes:       map[string]*pairAttempt{},
-		pairTickets:     map[[32]byte]string{},
-		pairTokens:      map[[32]byte]pairIdentity{},
-		bannedDeviceIDs: map[string]bool{},
-		seqBase:         time.Now().UnixMilli() * 1000,
-		done:            make(chan struct{}),
-		dirty:           make(chan struct{}, 1),
-		saverDone:       make(chan struct{}),
+		deviceMetadataLimit: maxDeviceMetadataBytes,
+		cleanup:             DeviceCleanup{UnpairedDays: cfg.CleanupUnpairedDays, PairedDays: cfg.CleanupPairedDays},
+		cacheOrder:          list.New(),
+		resource:            resource,
+		cfg:                 cfg,
+		log:                 cfg.Logger,
+		auth:                newAuthenticator(&cfg),
+		limiter:             newFailLimiter(cfg.AuthFailLimit, cfg.AuthFailWindow),
+		enrollLimiter:       newFailLimiter(10, time.Minute),
+		accounts:            map[string]*account{},
+		pending:             map[string]*pendingCmd{},
+		pairCodes:           map[string]*pairAttempt{},
+		pairTickets:         map[[32]byte]string{},
+		pairTokens:          map[[32]byte]pairIdentity{},
+		bannedDeviceIDs:     map[string]bool{},
+		seqBase:             time.Now().UnixMilli() * 1000,
+		done:                make(chan struct{}),
+		dirty:               make(chan struct{}, 1),
+		saverDone:           make(chan struct{}),
 	}
 	h.auth.cfg = &h.cfg
 	h.routes = map[string]route{
@@ -116,6 +122,7 @@ func New(cfg Config) (*Hub, error) {
 		"/app/stream":         {http.MethodGet, true, h.handleAppStream},
 		"/app/commands":       {http.MethodPost, true, h.handleAppCommands},
 		"/app/events":         {http.MethodGet, true, h.handleAppEvents},
+		"/app/push/register":  {http.MethodPost, true, h.handlePushRegister},
 	}
 	if err := h.loadDevices(); err != nil {
 		return nil, err
@@ -124,6 +131,12 @@ func New(cfg Config) (*Hub, error) {
 	h.receipts, err = newCommandReceipts(h.cfg.DataDir)
 	if err != nil {
 		return nil, err
+	}
+	if h.push, err = newPushState(&h.cfg); err != nil {
+		return nil, err
+	}
+	if h.push.enabled() {
+		go h.runPush(h.done)
 	}
 	go h.saver()
 	go h.janitor()
@@ -152,9 +165,14 @@ func (h *Hub) Close() {
 func (h *Hub) janitor() {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
+	nextCleanup := time.Now().Add(5 * time.Minute) // let computers reconnect after a restart first
 	for {
 		select {
 		case now := <-t.C:
+			if !now.Before(nextCleanup) {
+				nextCleanup = now.Add(cleanupSweepEvery)
+				h.RunDeviceCleanup()
+			}
 			h.auth.sweep(now)
 			h.limiter.sweep(now)
 			h.enrollLimiter.sweep(now)
@@ -423,6 +441,9 @@ func (s *sseWriter) send(event string, data []byte) error {
 func (h *Hub) handlePing(w http.ResponseWriter, _ *http.Request, _ string) {
 	caps, ttl := h.commandCapabilities()
 	caps = append([]string{"device.identity.v1", "pair.qr.v1", "session.remote.v1", "pair.revoke.v1"}, caps...)
+	if h.push.enabled() {
+		caps = append(caps, "push.fcm.v1")
+	}
 	authModes := []string{"device-pairing"}
 	if !h.cfg.DisableLegacyAPIKey {
 		authModes = append(authModes, "legacy-api-key")
@@ -453,10 +474,15 @@ func (h *Hub) handleRegister(w http.ResponseWriter, r *http.Request, acct string
 		return
 	}
 	h.mu.Lock()
-	st, status := h.registerDeviceLocked(acct, d, secretHash)
+	st, status, deferred := h.registerDeviceLocked(acct, d, secretHash)
 	h.mu.Unlock()
 	if status != 0 {
 		writeError(w, status, "电脑身份验证失败或本站设备容量已满")
+		return
+	}
+	if deferred {
+		h.log.Warn("device metadata update deferred: site metadata budget full", "account", acct, "deviceId", d.DeviceID)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": acct, "device": st, "metadataDeferred": true})
 		return
 	}
 	h.markDirty()
@@ -617,6 +643,7 @@ func (h *Hub) handleBridgeEvents(w http.ResponseWriter, r *http.Request, acct st
 			continue
 		}
 		last = e.seq
+		h.pushEventLocked(acct, a, dev, m, e.seq)
 	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": len(parsed), "lastSeq": last})
@@ -887,6 +914,54 @@ func (h *Hub) handleAppEvents(w http.ResponseWriter, r *http.Request, acct strin
 		return
 	}
 	page := h.readEventPageLocked(acct, deviceID, sessionKey, after, limit)
-	h.mu.Unlock()
-	writeJSON(w, http.StatusOK, page)
+	wait := eventWait(r)
+	if len(page.Events) > 0 || page.ResetRequired || wait <= 0 {
+		h.mu.Unlock()
+		writeJSON(w, http.StatusOK, page)
+		return
+	}
+	// Long poll: hold an empty read open until this account receives a new
+	// event, then answer once. One request per watching phone, no SSE.
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	for {
+		wake := a.wakeChanLocked()
+		h.mu.Unlock()
+		select {
+		case <-wake:
+		case <-deadline.C:
+			writeJSON(w, http.StatusOK, page)
+			return
+		case <-r.Context().Done():
+			return
+		case <-h.done:
+			writeJSON(w, http.StatusOK, page)
+			return
+		}
+		h.mu.Lock()
+		a = h.accounts[acct]
+		if a == nil || a.devices[deviceID] == nil || h.pairedDeviceLocked(acct, r) != a.devices[deviceID] {
+			h.mu.Unlock()
+			writeError(w, http.StatusForbidden, "这台电脑尚未与手机配对")
+			return
+		}
+		page = h.readEventPageLocked(acct, deviceID, sessionKey, after, limit)
+		if len(page.Events) > 0 || page.ResetRequired {
+			h.mu.Unlock()
+			writeJSON(w, http.StatusOK, page)
+			return
+		}
+	}
+}
+
+// eventWait parses the optional long-poll wait in seconds (0–25).
+func eventWait(r *http.Request) time.Duration {
+	n, err := strconv.Atoi(r.URL.Query().Get("wait"))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	if n > 25 {
+		n = 25
+	}
+	return time.Duration(n) * time.Second
 }

@@ -18,6 +18,7 @@ type Binary struct {
 	Size   int64  `json:"size_bytes"`
 }
 type Feed struct {
+	Product          string            `json:"product"`
 	Version          string            `json:"version"`
 	LauncherProtocol int               `json:"launcher_protocol"`
 	DataSchema       int               `json:"data_schema"`
@@ -190,7 +191,7 @@ func verifyFeed(data []byte, key ed25519.PublicKey) (Feed, error) {
 	if strictDecode(payload, &f) != nil {
 		return Feed{}, errors.New("签名清单包含未知字段或无效 JSON")
 	}
-	if _, err := parseVersion(f.Version); err != nil || f.LauncherProtocol != 1 || f.DataSchema != 1 || len(f.ReleaseNotes) > 4096 || len(f.Binaries) != 2 {
+	if _, err := parseVersion(f.Version); err != nil || f.Product != Product || f.LauncherProtocol != 1 || f.DataSchema != 1 || len(f.ReleaseNotes) > 4096 || len(f.Binaries) != 2 {
 		return Feed{}, errors.New("版本、启动协议或数据格式不兼容")
 	}
 	for _, platform := range []string{"linux/amd64", "linux/arm64"} {

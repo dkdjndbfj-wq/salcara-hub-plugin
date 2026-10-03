@@ -165,3 +165,25 @@ func TestDataLockReleasesAfterProcessCrash(t *testing.T) {
 	}
 	lock.release()
 }
+
+func TestTrustProxyIsExplicitAndValidated(t *testing.T) {
+	dir := t.TempDir()
+	base := map[string]string{"SALCARA_HUB_DATA_DIR": dir, "SALCARA_HUB_ADMIN_TOKEN_FILE": filepath.Join(dir, "admin-token")}
+	get := func(extra map[string]string) func(string) string {
+		return func(k string) string {
+			if v, ok := extra[k]; ok {
+				return v
+			}
+			return base[k]
+		}
+	}
+	if c, err := ConfigFromEnv(get(nil)); err != nil || c.TrustProxy {
+		t.Fatalf("default must not trust forwarding headers: %+v %v", c, err)
+	}
+	if c, err := ConfigFromEnv(get(map[string]string{"SALCARA_HUB_TRUST_PROXY": "true"})); err != nil || !c.TrustProxy {
+		t.Fatalf("explicit trust: %+v %v", c, err)
+	}
+	if _, err := ConfigFromEnv(get(map[string]string{"SALCARA_HUB_TRUST_PROXY": "maybe"})); err == nil {
+		t.Fatal("invalid value accepted")
+	}
+}

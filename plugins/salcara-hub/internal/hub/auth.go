@@ -173,26 +173,45 @@ func newFailLimiter(limit int, window time.Duration) *failLimiter {
 	return &failLimiter{limit: limit, window: window, m: map[string]*failWindow{}}
 }
 
+// limiterKey groups IPv6 clients by /64: one host usually owns a whole /64,
+// so per-address counting would let a single attacker spray fresh addresses.
+func limiterKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() != nil {
+		return ip
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+// blocked reports whether this client exceeded its failure budget. A full
+// table never blocks unknown clients: an attacker filling the table must not
+// lock every legitimate phone and computer out.
 func (l *failLimiter) blocked(ip string) bool {
+	key := limiterKey(ip)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	w, ok := l.m[ip]
-	if !ok && len(l.m) >= 65536 {
-		return true
-	}
+	w, ok := l.m[key]
 	return ok && time.Since(w.start) < l.window && w.count >= l.limit
 }
 
 func (l *failLimiter) fail(ip string) {
+	key := limiterKey(ip)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
-	w, ok := l.m[ip]
+	w, ok := l.m[key]
 	if !ok || now.Sub(w.start) >= l.window {
 		if !ok && len(l.m) >= 65536 {
-			return
+			for k, old := range l.m {
+				if now.Sub(old.start) >= l.window {
+					delete(l.m, k)
+				}
+			}
+			if len(l.m) >= 65536 {
+				return
+			}
 		}
-		l.m[ip] = &failWindow{start: now, count: 1}
+		l.m[key] = &failWindow{start: now, count: 1}
 		return
 	}
 	w.count++

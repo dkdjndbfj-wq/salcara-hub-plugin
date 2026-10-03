@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -32,20 +33,35 @@ func (h *Hub) loadDevices() error {
 	if h.cfg.DataDir == "" {
 		return nil
 	}
-	b, err := os.ReadFile(filepath.Join(h.cfg.DataDir, devicesFile))
+	path := filepath.Join(h.cfg.DataDir, devicesFile)
+	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxDevicesFileBytes {
+		return errors.New("devices.json must be a bounded regular file; inspect the persistent volume")
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	var st persistedState
-	if err := json.Unmarshal(b, &st); err != nil {
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return errors.New("devices.json changed while opening")
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxDevicesFileBytes+1))
+	if err != nil || len(b) > maxDevicesFileBytes {
+		return errors.New("devices.json exceeds the persistent metadata file limit")
+	}
+	st, charged, err := decodeDevicesState(b, h.deviceMetadataLimit)
+	if err != nil {
 		return fmt.Errorf("parse %s: %w", devicesFile, err)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.adminAudit = st.Audit
+	h.deviceMetadataBytes = charged
 	if len(h.adminAudit) > 200 {
 		h.adminAudit = h.adminAudit[len(h.adminAudit)-200:]
 	}
@@ -54,16 +70,18 @@ func (h *Hub) loadDevices() error {
 			return errors.New("persisted device capacity exceeded")
 		}
 		a := h.accountLocked(id)
+		a.metadataCharged = true
 		for _, pd := range devs {
-			if !validDeviceInfo(pd.Device) {
-				continue
-			}
+			_, charge, _ := prepareDeviceMetadata(pd.Device) // validated before allocating live maps
 			dev := &device{info: pd.Device, lastSeen: pd.LastSeen, banned: pd.Banned, banReason: pd.BanReason, bannedAt: pd.BannedAt}
-			if decoded, err := hex.DecodeString(pd.SecretHash); err == nil && len(decoded) == 32 {
+			dev.metadataBytes = charge
+			if pd.SecretHash != "" {
+				decoded, _ := hex.DecodeString(pd.SecretHash) // record validation already checked size/encoding
 				copy(dev.secretHash[:], decoded)
 				dev.hasSecret = true
 			}
-			if decoded, err := hex.DecodeString(pd.PairHash); err == nil && len(decoded) == 32 && !dev.banned {
+			if pd.PairHash != "" && !dev.banned {
+				decoded, _ := hex.DecodeString(pd.PairHash)
 				copy(dev.pairHash[:], decoded)
 				dev.hasPair = true
 			}
@@ -157,7 +175,11 @@ func (h *Hub) saveNow() {
 func (h *Hub) saveNowError() error {
 	h.saveMu.Lock()
 	defer h.saveMu.Unlock()
-	b, err := json.MarshalIndent(h.snapshot(), "", "  ")
+	// Compact serialization avoids indentation amplifying nested raw metadata.
+	b, err := json.Marshal(h.snapshot())
+	if err == nil && len(b) > maxDevicesFileBytes {
+		return errors.New("devices.json would exceed the persistent metadata file limit")
+	}
 	if err == nil {
 		err = writeFileAtomic(filepath.Join(h.cfg.DataDir, devicesFile), b, 0o600)
 	}
