@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 # Build the standalone Hub only: no Sub2API SDK, private keys or plugin runtime.
 FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS build
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 ARG VERSION=0.4.0-dev
 WORKDIR /src
 COPY deploy/standalone/go.mod ./go.mod
