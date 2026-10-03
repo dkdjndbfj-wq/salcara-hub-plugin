@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -20,6 +21,13 @@ import (
 // This fixture path exists only in test binaries, not the shipped launcher.
 func TestMain(m *testing.M) {
 	if os.Getenv("SALCARA_LAUNCHER_TEST_CHILD") == "1" {
+		version := "0.4.0"
+		if os.Args[0] == os.Getenv("SALCARA_LAUNCHER_TEST_IMAGE_PATH") {
+			if os.Getenv("SALCARA_LAUNCHER_TEST_FAIL_IMAGE") == "1" {
+				os.Exit(2)
+			}
+			version = os.Getenv("SALCARA_LAUNCHER_TEST_IMAGE_VERSION")
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 		defer stop()
 		server := &http.Server{Addr: os.Getenv("SALCARA_HUB_LISTEN"), Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -31,7 +39,7 @@ func TestMain(m *testing.M) {
 			if os.Getenv("SALCARA_LAUNCHER_TEST_WRONG_PRODUCT") == "1" {
 				product = "salcara-personal-hub"
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "service": "salcara-hub", "product": product, "version": "0.4.0", "pid": pid})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "service": "salcara-hub", "product": product, "version": version, "pid": pid})
 		})}
 		go func() {
 			<-ctx.Done()
@@ -144,5 +152,72 @@ func TestRunnerRejectsAnotherProductBeforeFallback(t *testing.T) {
 	t.Setenv("SALCARA_LAUNCHER_TEST_WRONG_PRODUCT", "0")
 	if err := runner.Start(context.Background(), r); err != nil {
 		t.Fatal("fallback could not start after wrong product stopped", err)
+	}
+}
+
+func processCachedFixture(t *testing.T) (*fixture, diskState) {
+	t.Helper()
+	f := newFixture(t)
+	executable := testProcessRelease(t)
+	data, err := os.ReadFile(executable.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.binary = data
+	f.feed = fixtureFeed(t, f.private, testFeed(data))
+	_, start := acceptedFixture(t, f)
+	start(true)
+	f.manager.job.Wait()
+	if err = os.Chmod(f.store.bootstrapPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(f.store.bootstrapPath, data, 0500); err != nil {
+		t.Fatal(err)
+	}
+	f.store.bootstrapVersion = "0.5.0"
+	t.Setenv("SALCARA_LAUNCHER_TEST_CHILD", "1")
+	t.Setenv("SALCARA_LAUNCHER_TEST_IMAGE_PATH", f.store.bootstrapPath)
+	t.Setenv("SALCARA_LAUNCHER_TEST_IMAGE_VERSION", "0.5.0")
+	state, err := f.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, state
+}
+
+func TestImageUpgradeStartsRealVerifiedChildAndConfirmsVersion(t *testing.T) {
+	f, state := processCachedFixture(t)
+	runner := &managedRunner{cfg: Config{DataDir: f.manager.cfg.DataDir, Listen: freeListen(t)}}
+	t.Cleanup(func() { runner.Stop() })
+	confirmed, err := f.store.startConfirmed(context.Background(), state, runner)
+	if err != nil || !confirmed.Current.Bootstrap || confirmed.Previous == nil || confirmed.Previous.Bootstrap {
+		t.Fatal("new image child was not health-confirmed with signed fallback", err)
+	}
+	if current, err := f.store.resolve(confirmed.Current); err != nil || current.Version != "0.5.0" {
+		t.Fatal("real image child version was not committed", err)
+	}
+}
+
+func TestUnhealthyImageStopsRealChildBeforeSignedCacheFallback(t *testing.T) {
+	f, state := processCachedFixture(t)
+	t.Setenv("SALCARA_LAUNCHER_TEST_FAIL_IMAGE", "1")
+	runner := &managedRunner{cfg: Config{DataDir: f.manager.cfg.DataDir, Listen: freeListen(t)}}
+	t.Cleanup(func() { runner.Stop() })
+	rolledBack, err := f.store.startConfirmed(context.Background(), state, runner)
+	if err != nil || rolledBack.Current.Bootstrap || rolledBack.FailedBootstrap == nil {
+		t.Fatal("real unhealthy image could not fall back to verified cache", err)
+	}
+	if current, err := f.store.resolve(rolledBack.Current); err != nil || current.Version != "0.4.0" || !strings.HasPrefix(filepath.Base(current.Path), "hub-") {
+		t.Fatal("fallback did not use signed cache executable", err)
+	}
+	if err = runner.Stop(); err != nil {
+		t.Fatal("fallback process could not be safely stopped", err)
+	}
+	restored, err := f.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted, err := f.store.startConfirmed(context.Background(), restored, runner); err != nil || restarted.Current.Bootstrap {
+		t.Fatal("container restart did not keep verified cache after image failure", err)
 	}
 }

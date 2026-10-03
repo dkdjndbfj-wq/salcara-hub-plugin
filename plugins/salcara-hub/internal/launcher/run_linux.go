@@ -69,37 +69,12 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	runner := &managedRunner{cfg: cfg}
-	m := newManager(ctx, cfg, s, state, runner)
-	current, err := s.resolve(state.Current)
+	state, err = s.startConfirmed(ctx, state, runner)
 	if err != nil {
 		listener.Close()
 		return err
 	}
-	if err = runner.Start(ctx, current); err != nil {
-		if state.Previous == nil {
-			listener.Close()
-			return err
-		}
-		previous, e := s.resolve(*state.Previous)
-		if e != nil {
-			listener.Close()
-			return e
-		}
-		if e = runner.Start(ctx, previous); e != nil {
-			listener.Close()
-			return errors.New("confirmed Hub and previous signed version are both unhealthy")
-		}
-		failed := state.Current
-		state.Current, state.Previous = *state.Previous, &failed
-		state.Job = &jobRecord{Status: "failed", Message: "启动版本未通过健康验证，已恢复前一确认程序；未回滚用户数据"}
-		if e = s.save(state); e != nil {
-			runner.Stop()
-			listener.Close()
-			return errors.New("fallback running state could not be committed; inspect volume")
-		}
-		m.state = state
-		m.setStatus(Status{Configured: !cfg.Disabled, CurrentVersion: previous.Version, Status: "failed", Message: state.Job.Message})
-	}
+	m := newManager(ctx, cfg, s, state, runner)
 	m.mu.Lock()
 	m.ready = true
 	m.mu.Unlock()

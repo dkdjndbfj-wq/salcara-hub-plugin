@@ -24,11 +24,20 @@ type jobRecord struct {
 	Status  string `json:"status"`
 	Message string `json:"message"`
 }
+
+// This is only a retry-suppression fingerprint, never an executable pointer.
+// A different image/version may be tried; the exact unhealthy image is not
+// retried on every container restart after a signed-cache fallback succeeds.
+type bootstrapFailure struct {
+	Version string `json:"version"`
+	SHA256  string `json:"sha256"`
+}
 type diskState struct {
-	Schema   int        `json:"schema_version"`
-	Current  reference  `json:"current"`
-	Previous *reference `json:"previous,omitempty"`
-	Job      *jobRecord `json:"last_job,omitempty"`
+	Schema          int               `json:"schema_version"`
+	Current         reference         `json:"current"`
+	Previous        *reference        `json:"previous,omitempty"`
+	Job             *jobRecord        `json:"last_job,omitempty"`
+	FailedBootstrap *bootstrapFailure `json:"failed_bootstrap,omitempty"`
 }
 type release struct {
 	Ref     reference
@@ -187,9 +196,15 @@ func (s *store) load() (diskState, error) {
 	if state.Job != nil && (len(state.Job.ID) > 128 || len(state.Job.Message) > 2048 || (state.Job.Status != "updating" && state.Job.Status != "failed" && state.Job.Status != "current")) {
 		return state, errors.New("invalid saved update status")
 	}
+	if err = validateBootstrapFailure(state.FailedBootstrap); err != nil {
+		return state, err
+	}
 	return state, nil
 }
 func (s *store) save(state diskState) error {
+	if err := validateBootstrapFailure(state.FailedBootstrap); err != nil {
+		return err
+	}
 	if _, err := s.resolve(state.Current); err != nil {
 		return err
 	}
@@ -228,6 +243,39 @@ func (s *store) save(state diskState) error {
 		return errors.New("cannot commit update state")
 	}
 	return syncDirectory(s.dir)
+}
+func validateBootstrapFailure(failure *bootstrapFailure) error {
+	if failure == nil {
+		return nil
+	}
+	if _, err := parseVersion(failure.Version); err != nil || !hashPattern.MatchString(failure.SHA256) {
+		return errors.New("invalid failed image fingerprint")
+	}
+	return nil
+}
+
+// preferBootstrap compares the trusted image with the verified signed cache.
+// Selecting a candidate does not commit it: startup health must pass first.
+// Resolve the signed current reference before considering the image, so a new
+// image is never used to hide a tampered or unsigned persisted reference.
+func (s *store) preferBootstrap(state diskState) (diskState, bool, error) {
+	current, err := s.resolve(state.Current)
+	if err != nil {
+		return state, false, err
+	}
+	if state.Current.Bootstrap || !newer(s.bootstrapVersion, current.Version) {
+		return state, false, nil
+	}
+	image, err := s.resolve(reference{Bootstrap: true})
+	if err != nil {
+		return state, false, err
+	}
+	if failed := state.FailedBootstrap; failed != nil && failed.Version == image.Version && failed.SHA256 == image.SHA256 {
+		return state, false, nil
+	}
+	previous := state.Current
+	state.Current, state.Previous = image.Ref, &previous
+	return state, true, nil
 }
 func syncDirectory(path string) error {
 	if runtime.GOOS == "windows" {
