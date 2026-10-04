@@ -39,7 +39,11 @@
 - 临时本机真实浏览器验收：登录、刷新恢复会话、改密后旧密钥拒绝、新密钥成功、退出通过；密钥不留在浏览器 storage，空闲不轮询。仅使用测试密钥，未调用模型或接触生产。
 - 固定范围 `f477f11 → 7610241` 的 Codex Security 源码审查完成：23 个源码类项目、全部 32 个改动路径已核验，没有可报告漏洞。此结论不覆盖随后目录整理，也不等于所有 bug 均不存在。
 - 目录整理另外进行独立审查：移动源码归一化 import 后与原文件一致；检查 Docker、CI、模块和本地文档链接。恢复每次 PR 的签名工具 test / vet 覆盖；Windows 测试只对 POSIX 权限断言分平台处理，业务断言保留。
-- 最终整理版本仍需从固定提交重新跑正式构建；不能使用早期产物代替最终源码。
+- 最终提交 `30b4819f0a39d9eb45290ecb967b5a1dfb4e5f8b` 的 [正式构建 / 镜像发布](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/actions/runs/37194857798) 和 [主分支完整检查](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/actions/runs/37194851272) 全部成功；重新构建最终源码，没有复用早期产物。
+- 正式镜像匿名拉取成功，两平台齐全；multiarch digest：`sha256:d103e8a20a820bf4edda46617119d2db03f0acadd257b23a041aecebaf62ba0c`。
+- 正式标签 `standalone-v0.5.0` 精确指向上述提交。四份二进制的 ELF 架构和 SHA-256、签名清单的发布者、签名、产品 / 协议 / schema、Hub 大小 / 哈希均核验成功。
+- [公开 Release](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases/tag/standalone-v0.5.0) 六个实际资产均重新匿名下载到新验收目录并再次验签、核对四份 SHA-256；之后才发布新更新清单。旧更新清单保持不变。
+- 源码、管理页、首次安装与恢复指南作为单一完整项目发布到 `main`；没有另交付源码副本。服务器未重新部署，真实手机 / 电脑端联测及 ARM 实机运行仍不在本轮验收范围。
 
 ## 明确边界
 
