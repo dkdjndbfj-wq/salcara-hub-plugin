@@ -70,3 +70,13 @@ CI/人工步骤见 `STANDALONE-RELEASE.zh.md`。源发布、GHCR image、GitHub 
 - 修正仍必须再跑 CI，以实际结果确认根因；不能因推测端口改变就宣称修复完成。
 
 第二轮 `37139332886` 重启 smoke 全部通过，证实端口修正；两架构导出被 ELF 架构校验阻止：Dockerfile 给自动 `TARGETARCH` 指定 `amd64` 默认值覆盖了 buildx 的 arm64 参数，导致 arm64 输出是 x86 文件。构建参数改为无默认值的 Docker 自动平台 ARG；保留架构强校验，不发布错误镜像。运行内核未改。
+
+## 最终正式 Docker 发布验收
+
+- 最终运行源码 `b84f4e2913d3f78ea855e6539ff34aeebde47722`；GitHub Actions `37141444610` 的 build、publish-image 均成功。包括最新镜像/缓存选择及 Linux 真子进程回归、全包/vet/race、非 root/read-only 容器 smoke、重启持久化和双架构 ELF 检查。
+- Actions artifact `11280692192`，下载 ZIP 26,059,613 字节，与 GitHub digest `sha256:9880031506f4bcb4563ca3cc4c1b1a4cf44215837b9a50f0c84f9cbdb3f2026a` 一致。使用既有仓库外私钥签名，固定公钥独立复验成功。
+- 正式 Release `standalone-v0.4.0` 已创建并公开，标签准确指向上述源码。原插件 `v0.3.1` 仍保持仓库 latest，不把独立 Docker 冒充插件升级。
+- 两个公开 Hub assets 和签名 feed 已重新下载到独立空目录，GitHub asset digest/size 与实际字节全部一致，再运行 `verify-release.mjs` 确认产品/签名/版本/两架构 hash 一致。
+- amd64 Hub：8,376,444 字节，SHA-256 `996388d9241c26a2fd6bd145fa94ed58dcdd66510b91c3365b8e377b28eaefcb`；arm64 Hub：7,733,372 字节，SHA-256 `8b855ab053e92d4e01383ad6ed43f8752f8b6f0cc090b0ec292f3fecc5482d13`。
+- GHCR 匿名 token 和 `0.4.0` OCI index 均返回 200。最终 index digest `sha256:e3b5f65957aefa8027cd18f725e73d287ce68a98f7f5d2df81f9cff9ce5dae31`；amd64 `sha256:066ea79351a8214c8fde2d814c40aea9301ba20bb28ae6a9a5e25616b70068e1`；arm64 `sha256:35cdf69038f71f7df74443ea5632cdb52a33570704477f10c3ef3e27103b743c`。两个 unknown/unknown 项为 provenance attestations，不是额外可运行平台。
+- 签名清单仅在上述公开复验之后发布到 `main/updates/standalone.json`。未部署或重启生产服务器、未改个人版/原插件 feed/数据卷。arm64、真实公网设备、生产容量与 FCM 仍须实际环境验收。
