@@ -50,13 +50,13 @@ test('release staging rejects invalid identities and versions before writing', t
   }
   assert.notEqual(run(fixture(t), '0.4.0', 'dkdjndbfj-wq/salcara-personal-hub').status, 0);
 });
-test('release configuration cannot overwrite the plugin or personal feed', () => {
+test('release configuration preserves the Hub product and public update identity', () => {
   const workflow = readFileSync(new URL('../../.github/workflows/standalone-release.yml', import.meta.url), 'utf8');
   assert.ok(workflow.includes('ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:'));
   assert.ok(!workflow.includes('publisher.private'));
   assert.ok(!workflow.includes('secrets.SALCARA'));
   assert.ok(!workflow.includes('gh release create'));
-  const source = readFileSync(new URL('../../plugins/salcara-hub/internal/launcher/config.go', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../../internal/launcher/config.go', import.meta.url), 'utf8');
   assert.ok(source.includes('main/updates/standalone-account.json'));
   assert.ok(source.includes('Product          = "salcara-hub-standalone"'));
 });

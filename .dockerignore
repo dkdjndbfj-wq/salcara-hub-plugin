@@ -1,28 +1,24 @@
-# Explicit source allowlist: operator secrets / old signed artifacts never enter the build context.
+# Explicit source allowlist: operator secrets and build artifacts never enter the build context.
 **
 !Dockerfile
 !LICENSE
 !THIRD_PARTY_NOTICES.md
-!deploy/
-!deploy/standalone/
-!deploy/standalone/go.mod
-!plugins/
-!plugins/salcara-hub/
-!plugins/salcara-hub/cmd/
-!plugins/salcara-hub/cmd/hub/
-!plugins/salcara-hub/cmd/hub/**
-!plugins/salcara-hub/cmd/hub-launcher/
-!plugins/salcara-hub/cmd/hub-launcher/**
-!plugins/salcara-hub/internal/
-!plugins/salcara-hub/internal/hub/
-!plugins/salcara-hub/internal/hub/**
-!plugins/salcara-hub/internal/standalone/
-!plugins/salcara-hub/internal/standalone/**
-!plugins/salcara-hub/internal/launcher/
-!plugins/salcara-hub/internal/launcher/**
-!plugins/salcara-hub/licenses/
-!plugins/salcara-hub/licenses/COPYING.GPL-3.0
-!plugins/salcara-hub/licenses/Go-LICENSE
+!go.mod
+!cmd/
+!cmd/hub/
+!cmd/hub/**
+!cmd/hub-launcher/
+!cmd/hub-launcher/**
+!internal/
+!internal/hub/
+!internal/hub/**
+!internal/standalone/
+!internal/standalone/**
+!internal/launcher/
+!internal/launcher/**
+!licenses/
+!licenses/COPYING.GPL-3.0
+!licenses/Go-LICENSE
 # Defensive exclusions even inside an otherwise allowed directory.
 **/.env*
 **/*.private.*

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const root = new URL('../../plugins/salcara-hub/internal/standalone/web/', import.meta.url);
+const root = new URL('../../internal/standalone/web/', import.meta.url);
 const source = await readFile(new URL('app.js', root), 'utf8');
 const markup = await readFile(new URL('index.html', root), 'utf8');
 // These values exist only in the isolated in-memory browser fixture.

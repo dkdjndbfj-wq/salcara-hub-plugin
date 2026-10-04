@@ -1,8 +1,11 @@
 name: Standalone Docker build and smoke test
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [Dockerfile, .dockerignore, go.mod, compose.yml, compose.release.yml, 'licenses/**', LICENSE, THIRD_PARTY_NOTICES.md, 'deploy/standalone/**', 'internal/**', 'cmd/**', 'tools/**', '.github/workflows/standalone-docker.yml', '.github/workflows/standalone-release.yml']
   pull_request:
-    paths: [Dockerfile, .dockerignore, compose.yml, 'deploy/standalone/**', 'plugins/salcara-hub/internal/hub/**', 'plugins/salcara-hub/internal/standalone/**', 'plugins/salcara-hub/internal/launcher/**', 'plugins/salcara-hub/cmd/hub/**', 'plugins/salcara-hub/cmd/hub-launcher/**', '.github/workflows/standalone-docker.yml']
+    paths: [Dockerfile, .dockerignore, go.mod, compose.yml, compose.release.yml, 'licenses/**', LICENSE, THIRD_PARTY_NOTICES.md, 'deploy/standalone/**', 'internal/**', 'cmd/**', 'tools/**', '.github/workflows/standalone-docker.yml', '.github/workflows/standalone-release.yml']
 permissions:
   contents: read
 jobs:
@@ -17,6 +20,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Test and vet the complete module, including public feed tools
+        env:
+          GOTOOLCHAIN: local
+          GOPROXY: off
+        run: go test ./... && go vet ./...
       - name: Validate Compose without operator secrets
         env:
           SALCARA_HUB_PUBLIC_URL: https://relay.example.com/salcara-hub

@@ -38,13 +38,13 @@ jobs:
           node-version: '22'
       - uses: actions/setup-go@v6
         with:
-          go-version-file: deploy/standalone/go.mod
+          go-version-file: go.mod
           cache: false
       - name: Test offline public feed signer without a real private key
         run: |
           mkdir -p /tmp/standalone-signer/tools
-          cp deploy/standalone/go.mod /tmp/standalone-signer/go.mod
-          cp -a plugins/salcara-hub/tools/standalone-feed /tmp/standalone-signer/tools/
+          cp go.mod /tmp/standalone-signer/go.mod
+          cp -a tools/standalone-feed /tmp/standalone-signer/tools/
           cd /tmp/standalone-signer
           GOTOOLCHAIN=local GOPROXY=off go test ./tools/standalone-feed
       - name: Validate deployment and management key login UI
@@ -101,5 +101,5 @@ jobs:
           tags: ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:${{ needs.build.outputs.version }}
           provenance: true
           sbom: true
-      # Signing is offline after artifact verification. No private publisher
-      # secret, production deploy, plugin release or personal release here.
+      # Signing is offline after artifact verification. No publisher private
+      # key or production deployment belongs in this workflow.

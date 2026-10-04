@@ -23,8 +23,8 @@ Hub 独立运行，不修改 Sub2API、不共用它的数据库，也不读取�
 将示例域名换成自己的域名。以下是本地审阅脚本后执行，不是远程 `curl | sh`。
 
 ```sh
-git clone --branch standalone-v0.5.0 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git
-cd salcara-hub-plugin
+git clone --branch standalone-v0.5.0 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
+cd salcara-hub
 less deploy/standalone/install.sh
 bash deploy/standalone/install.sh \
   --public-url https://relay.example.com/salcara-hub \

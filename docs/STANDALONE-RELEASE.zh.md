@@ -1,6 +1,6 @@
-# 中转站独立 Docker：发布与更新维护
+# Salcara Hub：发布与更新维护
 
-与个人版、原插件分开：产品 `salcara-hub-standalone`，镜像 `ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.0`，Git 标签 `standalone-v0.5.0`，新认证版本清单 `updates/standalone-account.json`。原插件 `v0.3.1`、`update.json` 以及旧 Docker 的 `updates/standalone.json` 不改，不发布个人版。
+产品标识 `salcara-hub-standalone`，镜像 `ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.0`，Git 标签 `standalone-v0.5.0`，新认证版本更新清单 `updates/standalone-account.json`。发布时保留上述兼容标识和公开下载地址，不覆盖任何既有签名更新清单。
 
 0.5.0 首次部署自动生成每站独立的管理密钥，没有账号。0.4.0 的管理令牌不再用于管理页登录。旧安装不能直接通过网页跨过认证迁移：先按 [部署指南](STANDALONE-DOCKER.zh.md) 停机备份、生成新认证文件，再切换镜像；配对及设备数据保留。旧更新源停留在 0.4.0，新安装只使用新更新源。
 
@@ -11,17 +11,17 @@
 3. 在同一源码 commit 用仓库外、既有 `salcara-local-20260930` Ed25519 私钥签名；不换发布者身份，不把私钥上传 GitHub 或服务器。下面示例只表示路径，不能把私钥内容写进命令或日志：
 
 ```sh
-cd plugins/salcara-hub
+# 从仓库根目录执行
 go run ./tools/standalone-feed \
   -payload /安全的新目录/standalone-payload.json \
-  -public-identity ../../publisher/public.json \
+  -public-identity publisher/public.json \
   -private-key /仓库外私有目录/publisher.private.b64 \
   -output /安全的新目录/standalone-account.json
 ```
 
 4. `publish_image=true` 在同一 commit 发布 GHCR 固定版本镜像；只使用 Actions 自带的 `GITHUB_TOKEN`（`packages:write`），不需要私钥 Secret。不使用未知 `latest`，不覆盖已发布的版本号。确认镜像为公开可拉取，并记录 multiarch digest。
 5. 给同一 commit 创建新的 `standalone-v版本号` 标签和 GitHub Release，上传 `salcara-hub_版本号_linux_amd64`、`salcara-hub_版本号_linux_arm64`、两架构 launcher、`SHA256SUMS`、签名后的 `standalone-account.json` 及说明。先确认两个 Hub HTTPS 下载均可达，并核对下载后的实际哈希。
-6. 最后把同一已验证签名清单发布到 `main/updates/standalone-account.json`。这是唯一会改变新认证版本管理页检查结果的步骤，必须在 release asset 可下载之后做。不要覆盖旧 `updates/standalone.json`，否则旧版本可能收到缺少认证初始化文件的跨版本更新；不修改原插件更新源，也不自动发布个人版。
+6. 最后把同一已验证签名清单发布到 `main/updates/standalone-account.json`。这是唯一会改变新认证版本管理页检查结果的步骤，必须在 release asset 可下载之后做。不要覆盖旧 `updates/standalone.json`，否则旧版本可能收到缺少认证初始化文件的跨版本更新。
 
 `tools/standalone-feed` 只读取一个明确传入的外部私钥、校验它与公开身份一致、生成新的 public envelope；不联网、不上传、不覆盖已存在的输出。必须备份签名私钥，否则旧安装将不能接受未来由新身份签名的版本。
 
@@ -55,7 +55,7 @@ docker compose -f compose.release.yml ps
 
 不能再执行 `-init` 或 `down -v`。切换镜像时，启动器先验签并核对现有缓存：镜像内置版本更高才尝试它，健康 / 产品 / PID / 版本通过后才提交；旧签名缓存作为回退程序保留。镜像不高于缓存则继续使用缓存，不降级。若新镜像内置程序不健康则恢复旧缓存，并记住失败镜像的版本与哈希；普通重启不会反复尝试同一个坏镜像，更换不同版本或内容的镜像后才允许重试。任何路径或签名校验错误仍拒绝执行，不借镜像升级绕过缓存校验。
 
-镜像升级不等于数据回滚；不要手工换成不兼容的旧镜像。不能同时运行源码 Compose、正式 Compose、原插件或个人版去写同一数据卷。
+镜像升级不等于数据回滚；不要手工换成不兼容的旧镜像。不能同时运行两套服务去写同一数据卷，包括源码 Compose 和正式 Compose。
 
 ## 更新缓存与磁盘
 
