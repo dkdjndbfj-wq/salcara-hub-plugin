@@ -2,7 +2,7 @@
 name: salcara-hub-standalone
 services:
   hub:
-    image: ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:${SALCARA_HUB_IMAGE_VERSION:-0.4.0}
+    image: ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:${SALCARA_HUB_IMAGE_VERSION:-0.5.0}
     user: "65532:65532"
     restart: unless-stopped
     stop_grace_period: 30s
@@ -14,7 +14,7 @@ services:
     environment:
       SALCARA_HUB_LISTEN: ":8787"
       SALCARA_HUB_DATA_DIR: /data
-      SALCARA_HUB_ADMIN_TOKEN_FILE: /data/admin-token
+      SALCARA_HUB_ADMIN_ACCOUNT_FILE: /data/admin-account.json
       SALCARA_HUB_PUBLIC_URL: "${SALCARA_HUB_PUBLIC_URL:?Set the HTTPS site URL ending in /salcara-hub}"
       SALCARA_HUB_TRUST_PROXY: "true"
       SALCARA_HUB_CLEANUP_UNPAIRED_DAYS: "7"

@@ -2,7 +2,7 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const apiBase = '../_admin/v1/';
-  let token = '', epoch = 0, offset = 0, total = 0, pending = null, busy = false, updateCandidate = null, updaterConfigured = false, resourceMode = '', modes = [], modeCandidate = null, cleanupCandidate = null;
+  let authenticated = false, csrf = '', epoch = 0, offset = 0, total = 0, pending = null, busy = false, updateCandidate = null, updaterConfigured = false, resourceMode = '', modes = [], modeCandidate = null, cleanupCandidate = null;
   const controllers = new Set();
   const names = { ping: '测量', revoke: '撤销绑定', disconnect: '临时断开', ban: '封禁', unban: '解封', 'resource-mode': '切换运行模式', 'device-cleanup': '修改自动清理', 'device-cleanup-run': '自动清理' };
   const limit = 50;
@@ -10,30 +10,36 @@
   function text(tag, value, cls = '') { const node = document.createElement(tag); node.textContent = String(value ?? '—'); if (cls) node.className = cls; return node; }
   function moment(ms) { return Number(ms) > 0 ? new Date(Number(ms)).toLocaleString() : '尚无记录'; }
   function clearData() { for (const id of ['online','registered','paired','running','waiting','pending','banned','errors']) $(id).textContent = '—'; $('devices').replaceChildren(); $('audit').replaceChildren(); }
-  function logout(message = '已退出，页面不再保留管理令牌。') {
-    token = ''; epoch++; for (const c of controllers) c.abort(); controllers.clear();
+  function clearSession(message = '已退出管理。') {
+    authenticated = false; csrf = ''; epoch++; for (const c of controllers) c.abort(); controllers.clear();
     pending = null; busy = false; updateCandidate = null; updaterConfigured = false; resourceMode = ''; modes = []; modeCandidate = null; if ($('operation').open) $('operation').close(); if ($('update-dialog').open) $('update-dialog').close(); if ($('mode-dialog').open) $('mode-dialog').close(); cleanupCandidate = null; if ($('cleanup-dialog').open) $('cleanup-dialog').close(); $('cleanup-current').textContent = '未认证'; $('cleanup-details').textContent = '';
     $('mode-options').replaceChildren(); $('mode-current').textContent = '未认证'; $('mode-details').textContent = '';
-    $('admin-token').value = ''; $('login').disabled = false; $('workspace').hidden = true; $('login-panel').hidden = false; clearData(); syncUpdateButtons();
+    $('admin-password').value = ''; clearPasswordForm(); if ($('password-dialog').open) $('password-dialog').close(); $('login').disabled = false; $('workspace').hidden = true; $('login-panel').hidden = false; clearData(); syncUpdateButtons();
     $('health').textContent = '尚未认证'; $('health').className = 'pill'; note(message);
   }
-  async function request(path, method = 'GET', body) {
-    if (!token) throw new Error('请先验证管理员令牌。');
-    const generation = epoch, auth = token, controller = new AbortController(); controllers.add(controller);
+  async function request(path, method = 'GET', body, anonymous = false) {
+    if (!authenticated && !anonymous) throw new Error('请先登录。');
+    const generation = epoch, controller = new AbortController(); controllers.add(controller);
     const timeout = setTimeout(() => controller.abort(), path === 'update/check' ? 30000 : 20000);
     try {
-      const response = await fetch(apiBase + path, { method, headers: { Authorization: `Bearer ${auth}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, credentials: 'omit', cache: 'no-store', redirect: 'error', signal: controller.signal, referrerPolicy: 'no-referrer' });
-      if (generation !== epoch || !token) throw new Error('管理员会话已关闭。');
-      if (response.status === 401) { logout('管理员令牌无效或已更换，请重新验证。'); throw new Error('管理员验证失败。'); }
+      const response = await fetch(apiBase + path, { method, headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(method !== 'GET' && !anonymous ? { 'X-Salcara-CSRF': csrf } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal, referrerPolicy: 'no-referrer' });
+      if (generation !== epoch) throw new Error('管理员会话已关闭。');
+      if (response.status === 401) { if (!anonymous) clearSession('登录已过期，请重新进入。'); throw new Error(path === 'auth/login' ? '管理密钥不正确。' : '请重新进入。'); }
       let data; try { data = await response.json(); } catch { throw new Error('返回的不是 Hub 接口，请检查反向代理路径。'); }
-      if (generation !== epoch || !token) throw new Error('管理员会话已关闭。');
+      if (generation !== epoch) throw new Error('管理员会话已关闭。');
       if (!response.ok) throw new Error(data.error || data.message || `请求失败（${response.status}）`);
       return data;
     } catch (error) { if (error.name === 'AbortError') throw new Error('请求中断或超时；操作可能已送达，请刷新状态，不要直接重复操作。'); throw error; }
     finally { clearTimeout(timeout); controllers.delete(controller); }
   }
+  function activateSession(value) {
+    if (typeof value.csrf_token !== 'string' || value.csrf_token.length < 32 || value.csrf_token.length > 128 || /[^A-Za-z0-9_-]/.test(value.csrf_token)) throw new Error('登录响应无效，请检查 Hub 地址。');
+    csrf = value.csrf_token; authenticated = true;
+  }
+  function clearPasswordForm() { for (const id of ['current-password', 'new-password', 'confirm-password']) $(id).value = ''; $('password-notice').textContent = ''; }
+  function showWorkspace() { $('workspace').hidden = false; $('login-panel').hidden = true; }
   function render(value) {
-    if (!token) return;
+    if (!authenticated) return;
     const stats = value.stats || {};
     for (const [id, field] of Object.entries({ online:'online_devices', registered:'devices', paired:'paired_devices', running:'running_sessions', waiting:'waiting_approvals', pending:'pending_commands', banned:'banned_devices', errors:'request_errors' })) $(id).textContent = stats[field] ?? '—';
     $('health').textContent = 'Hub 已连接'; $('health').className = 'pill ok';
@@ -65,24 +71,53 @@
     const generation = epoch;
     const query = new URLSearchParams({ query: $('search').value.trim(), filter: $('filter').value, offset: String(offset), limit: String(limit) });
     try { const data = await request(`state?${query}`); render(data); note('状态已刷新；不会后台轮询。'); }
-    catch (error) { if (generation === epoch) { if (token) { $('health').textContent = '连接不可用'; $('health').className = 'pill bad'; } note(error.message, true); } throw error; }
+    catch (error) { if (generation === epoch) { if (authenticated) { $('health').textContent = '连接不可用'; $('health').className = 'pill bad'; } note(error.message, true); } throw error; }
   }
   function begin(action, ref) { if (busy) return; if (action === 'ping') { perform({ action, device_ref: ref, reason: '', confirm: true }); return; } pending = { action, device_ref: ref }; $('operation-title').textContent = `确认${names[action]}`; $('reason').value = ''; $('operation').showModal(); }
   async function perform(value) { if (busy) return; const generation = epoch; busy = true; syncUpdateButtons(); note('正在执行；不会自动重试。'); try { await request('action', 'POST', value); await refresh(); if (generation === epoch) note('管理操作完成。'); } catch (error) { if (generation === epoch) note(error.message, true); } finally { if (generation === epoch) { busy = false; syncUpdateButtons(); } } }
-  $('login-form').addEventListener('submit', async event => { event.preventDefault(); if (busy) return; const candidate = $('admin-token').value.trim(); if (candidate.length < 32 || candidate.length > 4096) { note('令牌格式不正确。', true); return; } token = candidate; const generation = ++epoch; $('admin-token').value = ''; $('login').disabled = true; try { await refresh(); if (generation === epoch && token) { $('workspace').hidden = false; $('login-panel').hidden = true; } } catch { if (generation === epoch && token) logout('验证未完成，请检查 Hub 地址后重新输入管理令牌。'); } finally { if (generation === epoch) $('login').disabled = false; } });
-  $('logout').addEventListener('click', () => logout()); $('refresh').addEventListener('click', () => refresh().catch(() => {}));
+  $('login-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (busy) return;
+    const password = $('admin-password').value;
+    if (password.length < 16 || new TextEncoder().encode(password).length > 1024) { note('请填写管理密钥。', true); return; }
+    const generation = ++epoch; busy = true; $('admin-password').value = ''; $('login').disabled = true;
+    try { const session = await request('auth/login', 'POST', { password }, true); activateSession(session); await refresh(); if (generation === epoch) showWorkspace(); }
+    catch (error) { if (generation === epoch) clearSession(error.message); }
+    finally { if (generation === epoch) { busy = false; $('login').disabled = false; syncUpdateButtons(); } }
+  });
+  $('logout').addEventListener('click', async () => {
+    if (busy || !authenticated) return; busy = true; syncUpdateButtons(); const generation = epoch;
+    try { await request('auth/logout', 'POST', {}); if (generation === epoch) clearSession(); }
+    catch (error) { if (generation === epoch) note(`退出未确认：${error.message}`, true); }
+    finally { if (generation === epoch) { busy = false; syncUpdateButtons(); } }
+  });
+  $('refresh').addEventListener('click', () => refresh().catch(() => {}));
+  $('change-password').addEventListener('click', () => { if (busy) return; clearPasswordForm(); $('password-dialog').showModal(); });
+  $('cancel-password').addEventListener('click', () => { if (busy) return; clearPasswordForm(); $('password-dialog').close(); });
+  $('password-dialog').addEventListener('close', clearPasswordForm);
+  $('password-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (busy || !authenticated) return;
+    const current_password = $('current-password').value, new_password = $('new-password').value;
+    if (new_password !== $('confirm-password').value) { $('password-notice').textContent = '两次新密钥不一致。'; return; }
+    if (new_password.length < 16 || new TextEncoder().encode(new_password).length > 1024) { $('password-notice').textContent = '新密钥至少 16 个字符，最长 1024 字节。'; return; }
+    const generation = epoch; busy = true; syncUpdateButtons();
+    // Clear sensitive inputs before the request; failures never auto-retry a password change.
+    clearPasswordForm();
+    try { const value = await request('auth/password', 'POST', { current_password, new_password }); if (generation === epoch) clearSession(value.durability_warning ? '密钥已更换，但保存或清理未完全确认；请用新密钥进入并检查服务器。' : '密钥已更换，请用新密钥进入。'); }
+    catch (error) { if (generation === epoch) { $('password-dialog').close(); note(`${error.message} 若发送超时，请先尝试新密钥进入，不要重复提交。`, true); } }
+    finally { if (generation === epoch) { busy = false; syncUpdateButtons(); } }
+  });
   $('filter-form').addEventListener('submit', event => { event.preventDefault(); offset = 0; refresh().catch(() => {}); });
   $('prev').addEventListener('click', () => { offset = Math.max(0,offset-limit); refresh().catch(() => {}); }); $('next').addEventListener('click', () => { offset += limit; refresh().catch(() => {}); });
   $('cancel-operation').addEventListener('click', () => { pending = null; $('operation').close(); });
   $('operation-form').addEventListener('submit', event => { event.preventDefault(); if (!pending) return; const reason = $('reason').value.trim(); if (!reason || new TextEncoder().encode(reason).length > 256) { note('操作原因需要 1–256 字节。', true); return; } const action = { ...pending, reason, confirm: true }; pending = null; $('operation').close(); perform(action); });
   function renderUpdate(value) {
-    if (!token) return;
+    if (!authenticated) return;
     updateCandidate = value.status === 'available' && /^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(value.latest_version || '') && /^[a-f0-9]{64}$/.test(value.sha256 || '') ? { version: value.latest_version, sha256: value.sha256 } : null;
     const labels = { current: '已经是最新版本', available: '发现可用更新', unavailable: '暂时无法取得可信更新', unconfigured: '没有连接更新组件', updating: '更新任务已受理，请稍后查询结果', failed: '更新未完成，请查看状态；不要自动重试', updated: '更新完成', rolled_back: '新程序验证失败，已回到旧程序' };
     $('update-status').textContent = `${labels[value.status] || '更新状态待确认'}${value.current_version ? ` · 当前 ${value.current_version}` : ''}${value.latest_version ? ` · 发布 ${value.latest_version}` : ''}${value.message ? `。${value.message}` : ''}${value.release_notes ? `\n${value.release_notes}` : ''}`;
     $('install-update').disabled = !updateCandidate || busy; $('check-update').disabled = !updaterConfigured || busy; $('update-result').disabled = !updaterConfigured || busy;
   }
-  function syncUpdateButtons() { $('check-update').disabled = !updaterConfigured || busy; $('update-result').disabled = !updaterConfigured || busy; $('install-update').disabled = !updateCandidate || busy; for (const button of $('mode-options').children) button.disabled = busy || button.dataset.mode === resourceMode; for (const id of ['cleanup-save','cleanup-run','cleanup-unpaired','cleanup-paired']) $(id).disabled = busy || !token; }
+  function syncUpdateButtons() { $('check-update').disabled = !updaterConfigured || busy; $('update-result').disabled = !updaterConfigured || busy; $('install-update').disabled = !updateCandidate || busy; $('change-password').disabled = busy; $('save-password').disabled = busy; $('cancel-password').disabled = busy; $('logout').disabled = busy; for (const button of $('mode-options').children) button.disabled = busy || button.dataset.mode === resourceMode; for (const id of ['cleanup-save','cleanup-run','cleanup-unpaired','cleanup-paired']) $(id).disabled = busy || !authenticated; }
   function renderModes(value) {
     resourceMode = typeof value.resource_mode === 'string' ? value.resource_mode : '';
     modes = Array.isArray(value.resource_modes) ? value.resource_modes.filter(p => p && ['economy','balanced','performance'].includes(p.id)) : [];
@@ -157,5 +192,12 @@
     catch (error) { if (generation === epoch) note(`${error.message} 请稍后查询更新结果，不要重复提交。`, true); }
     finally { if (generation === epoch) { busy = false; syncUpdateButtons(); } }
   });
-  addEventListener('pagehide', () => logout('管理页面已关闭。'));
+  async function restoreSession() {
+    const generation = epoch;
+    try { const session = await request('auth/session', 'GET', undefined, true); activateSession(session); await refresh(); if (generation === epoch) showWorkspace(); }
+    catch { if (generation === epoch) clearSession(''); }
+  }
+  addEventListener('pagehide', () => clearSession('管理页面已关闭。'));
+  addEventListener('pageshow', event => { if (event.persisted) restoreSession(); });
+  restoreSession();
 })();

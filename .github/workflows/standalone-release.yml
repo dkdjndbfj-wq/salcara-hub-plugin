@@ -5,7 +5,7 @@ on:
       version:
         description: Bare stable version, matching the standalone release tag
         required: true
-        default: '0.4.0'
+        default: '0.5.0'
       publish_image:
         description: Publish the tested image to GHCR (does not deploy a server)
         type: boolean
@@ -47,11 +47,13 @@ jobs:
           cp -a plugins/salcara-hub/tools/standalone-feed /tmp/standalone-signer/tools/
           cd /tmp/standalone-signer
           GOTOOLCHAIN=local GOPROXY=off go test ./tools/standalone-feed
-      - name: Validate deployment and preserve Claude's administrator UI
+      - name: Validate deployment and management key login UI
         env:
           SALCARA_HUB_PUBLIC_URL: https://relay.example.com/salcara-hub
         run: |
           docker compose -f compose.release.yml config --quiet
+          bash -n deploy/standalone/install.sh deploy/standalone/install.test.sh
+          bash deploy/standalone/install.test.sh
           node --test deploy/standalone/admin-ui.test.mjs deploy/standalone/release.test.mjs
       - name: Build amd64 with Go tests, vet and race checks
         env:

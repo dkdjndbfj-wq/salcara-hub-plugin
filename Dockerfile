@@ -3,7 +3,7 @@
 FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS build
 ARG TARGETOS
 ARG TARGETARCH
-ARG VERSION=0.4.0-dev
+ARG VERSION=0.5.0-dev
 WORKDIR /src
 COPY deploy/standalone/go.mod ./go.mod
 COPY plugins/salcara-hub/internal/hub ./internal/hub
@@ -23,7 +23,7 @@ COPY --from=build /out/salcara-hub /salcara-hub
 COPY --from=build /out/salcara-hub-launcher /salcara-hub-launcher
 
 FROM scratch AS runtime
-ARG VERSION=0.4.0-dev
+ARG VERSION=0.5.0-dev
 LABEL org.opencontainers.image.title="Salcara Hub standalone" \
       org.opencontainers.image.description="Independent device pairing and remote message relay; no model API key required" \
       org.opencontainers.image.source="https://github.com/dkdjndbfj-wq/salcara-hub-plugin" \
@@ -37,7 +37,7 @@ COPY LICENSE THIRD_PARTY_NOTICES.md /licenses/
 COPY plugins/salcara-hub/licenses/COPYING.GPL-3.0 plugins/salcara-hub/licenses/Go-LICENSE /licenses/
 USER 65532:65532
 WORKDIR /data
-ENV SALCARA_HUB_LISTEN=:8787 SALCARA_HUB_DATA_DIR=/data SALCARA_HUB_ADMIN_TOKEN_FILE=/data/admin-token GOMEMLIMIT=32MiB
+ENV SALCARA_HUB_LISTEN=:8787 SALCARA_HUB_DATA_DIR=/data SALCARA_HUB_ADMIN_ACCOUNT_FILE=/data/admin-account.json GOMEMLIMIT=32MiB
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/salcara-hub-launcher", "-healthcheck"]
 ENTRYPOINT ["/salcara-hub-launcher"]

@@ -33,7 +33,7 @@ func newControlClient(cfg Config) (*controlClient, error) {
 	if cfg.ControlSocket == "" {
 		return nil, nil
 	}
-	token, err := readAdminToken(cfg.ControlTokenFile)
+	token, err := readControlToken(cfg.ControlTokenFile)
 	if err != nil {
 		return nil, errors.New("Hub update control credential is unavailable or unsafe")
 	}

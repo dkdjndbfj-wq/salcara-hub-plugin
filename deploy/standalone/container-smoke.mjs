@@ -15,7 +15,10 @@ const label = 'salcara.test=standalone';
 let madeContainer = false;
 let madeVolume = false;
 let tempDir;
-let token;
+let password;
+let cookie;
+let csrf;
+let recoveredPassword;
 const docker = (args, options = {}) => execFileSync('docker', args, {
   encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 45000, ...options,
 }).trim();
@@ -53,7 +56,7 @@ try {
   try {
     docker(['run', '--rm', '--network', 'none', '--read-only', ...mount, ...env, image, '-init']);
   } catch { refusedExisting = true; }
-  assert.ok(refusedExisting, 'initialization must not overwrite an existing admin token');
+  assert.ok(refusedExisting, 'initialization must not overwrite an existing admin password');
 
   docker(['run', '-d', '--name', container, '--label', label, '--read-only',
     '--cap-drop=ALL', '--security-opt=no-new-privileges',
@@ -88,14 +91,35 @@ try {
   assert.equal(clean.headers.get('location'), '/salcara-hub/admin/');
   assert.equal((await request('/salcara-hub/_admin/v1/state')).status, 401);
 
-  // Read ONLY the new isolated test token, never an operator's token. Never print it.
+  // Read ONLY the new isolated fixture password. Never print it or use an operator's file.
   tempDir = mkdtempSync(join(tmpdir(), 'salcara-hub-standalone-test-'));
-  const testTokenPath = join(tempDir, 'admin-token');
-  docker(['cp', `${container}:/data/admin-token`, testTokenPath]);
-  assert.equal(statSync(testTokenPath).mode & 0o777, 0o600);
-  token = readFileSync(testTokenPath, 'utf8').trim();
-  assert.match(token, /^[a-f0-9]{64}$/);
-  const adminHeaders = { Authorization: `Bearer ${token}` };
+  const testPasswordPath = join(tempDir, 'admin-initial-login.txt');
+  docker(['cp', `${container}:/data/admin-initial-login.txt`, testPasswordPath]);
+  assert.equal(statSync(testPasswordPath).mode & 0o777, 0o600);
+  password = readFileSync(testPasswordPath, 'utf8').trim();
+  assert.match(password, /^[A-Za-z0-9_-]{43}$/);
+  const origin = 'https://relay.example.com';
+  const login = async value => {
+    const result = await request('/salcara-hub/_admin/v1/auth/login', {
+      method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: value }),
+    });
+    assert.equal(result.status, 200);
+    const header = result.headers.get('set-cookie');
+    assert.match(header, /HttpOnly/i); assert.match(header, /Secure/i);
+    assert.match(header, /SameSite=Strict/i); assert.match(header, /Path=\/salcara-hub\//i);
+    cookie = header.split(';')[0]; csrf = (await result.json()).csrf_token;
+    assert.match(csrf, /^[A-Za-z0-9_-]{32,128}$/);
+  };
+  await login(password);
+  let adminHeaders = { Cookie: cookie, Origin: origin, 'X-Salcara-CSRF': csrf };
+  assert.equal((await request('/salcara-hub/_admin/v1/state', { headers: { Authorization: `Bearer ${password}` } })).status, 401,
+    'administrator Bearer authentication was removed');
+  const noCSRF = await request('/salcara-hub/_admin/v1/resource-mode', {
+    method: 'POST', headers: { Cookie: cookie, Origin: origin, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'balanced', confirm: true }),
+  });
+  assert.equal(noCSRF.status, 403);
   const stateResponse = await request('/salcara-hub/_admin/v1/state', { headers: adminHeaders });
   assert.equal(stateResponse.status, 200);
   const state = await stateResponse.json();
@@ -110,7 +134,7 @@ try {
   // Status does not fetch the public feed. Never apply a real
   // network update or use an operator publisher private key in this smoke.
   const changeMode = async (mode, confirm) => request('/salcara-hub/_admin/v1/resource-mode', {
-    method: 'POST', headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+    method: 'POST', headers: { Cookie: cookie, Origin: origin, 'X-Salcara-CSRF': csrf, 'Content-Type': 'application/json' },
     body: JSON.stringify({ mode, confirm }),
   });
   assert.equal((await changeMode('balanced', false)).status, 400);
@@ -127,17 +151,66 @@ try {
     if (i === 39) startupFailure('restart failed');
     await sleep(250);
   }
+  assert.equal((await request('/salcara-hub/_admin/v1/state', { headers: adminHeaders })).status, 401,
+    'process restart revokes in-memory login sessions');
+  await login(password);
+  adminHeaders = { Cookie: cookie, Origin: origin, 'X-Salcara-CSRF': csrf };
   const restarted = await request('/salcara-hub/_admin/v1/state', { headers: adminHeaders });
-  assert.equal(restarted.status, 200,
-    'restart must preserve the existing admin identity');
+  assert.equal(restarted.status, 200, 'password is preserved across restart');
   assert.equal((await restarted.json()).resource_mode, 'balanced', 'restart must preserve the selected resource mode');
   assert.equal((await changeMode('economy', true)).status, 200);
+  const oldCookie = cookie;
+  const newPassword = randomBytes(32).toString('base64url');
+  const changed = await request('/salcara-hub/_admin/v1/auth/password', {
+    method: 'POST', headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: password, new_password: newPassword }),
+  });
+  assert.equal(changed.status, 200);
+  assert.equal((await request('/salcara-hub/_admin/v1/state', { headers: { Cookie: oldCookie } })).status, 401);
+  const rejected = await request('/salcara-hub/_admin/v1/auth/login', {
+    method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ password }),
+  });
+  assert.equal(rejected.status, 401, 'old password cannot log in after change');
+  await login(newPassword);
+  let initialFileRemoved = false;
+  try { docker(['cp', `${container}:/data/admin-initial-login.txt`, join(tempDir, 'must-not-exist')]); }
+  catch { initialFileRemoved = true; }
+  assert.ok(initialFileRemoved, 'password change removes container initial plaintext file');
+  let refusedLiveReset = false;
+  try { docker(['run', '--rm', '--network', 'none', '--read-only', ...mount, ...env, image, '-reset-admin-key']); }
+  catch { refusedLiveReset = true; }
+  assert.ok(refusedLiveReset, 'offline recovery must refuse a live data writer');
+  docker(['stop', '--time', '30', container]);
+  docker(['run', '--rm', '--network', 'none', '--read-only', ...mount, ...env, image, '-reset-admin-key']);
+  docker(['start', container]);
+  refreshBoundPort();
+  for (let i = 0; i < 40; i++) {
+    try { if ((await request('/healthz')).ok) break; } catch { /* startup */ }
+    if (i === 39) startupFailure('restart after offline recovery failed');
+    await sleep(250);
+  }
+  const recoveredPath = join(tempDir, 'recovered-initial-login.txt');
+  docker(['cp', `${container}:/data/admin-initial-login.txt`, recoveredPath]);
+  assert.equal(statSync(recoveredPath).mode & 0o777, 0o600);
+  recoveredPassword = readFileSync(recoveredPath, 'utf8').trim();
+  assert.match(recoveredPassword, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(recoveredPassword, newPassword);
+  assert.equal((await request('/salcara-hub/_admin/v1/state', { headers: { Cookie: cookie } })).status, 401);
+  const obsoleteLogin = await request('/salcara-hub/_admin/v1/auth/login', {
+    method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: newPassword }),
+  });
+  assert.equal(obsoleteLogin.status, 401, 'the previous key is revoked after offline recovery');
+  await login(recoveredPassword);
+  const recoveredState = await request('/salcara-hub/_admin/v1/state', { headers: { Cookie: cookie } });
+  assert.equal(recoveredState.status, 200);
+  assert.equal((await recoveredState.json()).resource_mode, 'economy', 'offline key recovery preserves saved service configuration');
   const logResult = spawnSync('docker', ['logs', container], { encoding: 'utf8', timeout: 45000 });
   assert.equal(logResult.status, 0, 'isolated test logs must be readable');
-  assert.ok(!(logResult.stdout + logResult.stderr).includes(token), 'new test token must never appear in container logs');
-  console.log('Standalone container smoke passed: one-container launcher, non-root/read-only, safe init, health, prefix/iframe isolation, admin auth, three resource modes and persistence, update status without fetching a feed.');
+  assert.ok(![password, newPassword, recoveredPassword, cookie, csrf].some(secret => (logResult.stdout + logResult.stderr).includes(secret)),
+    'passwords and session secrets must never appear in container logs');
+  console.log('Standalone container smoke passed: isolated management key login, secure cookie/CSRF, change/revocation, offline recovery, persistence, non-root/read-only launcher and update status.');
 } finally {
-  token = undefined;
+  password = cookie = csrf = recoveredPassword = undefined;
   if (madeContainer) {
     const owned = docker(['inspect', '--format', '{{index .Config.Labels "salcara.test"}}', container]);
     assert.equal(owned, 'standalone');

@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"salcara/hubplugin/internal/hub"
@@ -19,19 +21,59 @@ import (
 func serverFixture(t *testing.T) (*Server, Config, string) {
 	t.Helper()
 	cfg := testConfig(t)
-	if err := InitAdminToken(cfg.AdminTokenFile); err != nil {
+	if err := InitAdminAccount(cfg); err != nil {
 		t.Fatal(err)
 	}
-	token, err := readAdminToken(cfg.AdminTokenFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	password := initialPassword(t, cfg)
 	s, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return s, cfg, string(token)
+	return s, cfg, password
+}
+
+func initialPassword(t *testing.T, cfg Config) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(cfg.DataDir, initialLoginFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	password := strings.TrimSuffix(string(raw), "\n")
+	if len(password) != 43 || strings.ContainsAny(password, "\r\n=") {
+		t.Fatal("initial password was not privately saved as exactly one raw line")
+	}
+	return password
+}
+
+type fixtureSession struct {
+	cookie *http.Cookie
+	csrf   string
+}
+
+var fixtureSessions sync.Map
+
+func fixtureLogin(t *testing.T, s *Server, password string) fixtureSession {
+	t.Helper()
+	if cached, ok := fixtureSessions.Load(s); ok {
+		return cached.(fixtureSession)
+	}
+	body, _ := json.Marshal(map[string]string{"password": password})
+	r := httptest.NewRequest(http.MethodPost, "http://example.test"+Prefix+"/_admin/v1/auth/login", bytes.NewReader(body))
+	r.Header.Set("Origin", "http://example.test")
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	var out struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || len(out.CSRF) != 43 || len(w.Result().Cookies()) != 1 {
+		t.Fatalf("fixture account login failed: %d", w.Code)
+	}
+	session := fixtureSession{cookie: w.Result().Cookies()[0], csrf: out.CSRF}
+	fixtureSessions.Store(s, session)
+	t.Cleanup(func() { fixtureSessions.Delete(s) })
+	return session
 }
 
 func TestHealthReportsExactProcessIdentityWithoutCredential(t *testing.T) {
@@ -52,8 +94,12 @@ func adminRequest(t *testing.T, s *Server, method, path, token string, body any)
 	t.Helper()
 	b, _ := json.Marshal(body)
 	r := httptest.NewRequest(method, "http://example.test"+path, bytes.NewReader(b))
+	r.Header.Set("Origin", "http://example.test")
+	r.Header.Set("Content-Type", "application/json")
 	if token != "" {
-		r.Header.Set("Authorization", "Bearer "+token)
+		session := fixtureLogin(t, s, token)
+		r.AddCookie(session.cookie)
+		r.Header.Set("X-Salcara-CSRF", session.csrf)
 	}
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, r)
@@ -85,6 +131,13 @@ func TestStaticPagesStripInjectedCredentialsAndAdminCannotUseQueryCookies(t *tes
 		t.Fatal("relay cookie became Hub admin authority")
 	}
 	r.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 401 {
+		t.Fatal("legacy bearer credential became Hub admin authority")
+	}
+	r.Header.Del("Authorization")
+	r.AddCookie(fixtureLogin(t, s, token).cookie)
 	r.Header.Set("Origin", "https://attacker.example")
 	w = httptest.NewRecorder()
 	s.ServeHTTP(w, r)

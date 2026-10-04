@@ -4,7 +4,9 @@
 
 ## 推荐：独立 Docker + 可视化侧边栏
 
-新部署推荐 [独立 Docker 安装说明](docs/STANDALONE-DOCKER.zh.md)：单独运行 Hub，将 `/salcara-hub/` 反代到独立容器，再把同源管理页添加到 Sub2API 的自定义 iframe 侧边栏。**无需修改官方 Sub2API 或安装服务器插件**；Sub2API 与 Hub 分别升级。管理员入口和普通用户说明页分离，管理员 API 另有独立随机令牌，不拿模型 Key 或 Sub2API iframe token 当管理员权限。
+新部署推荐 [独立 Docker 安装说明](docs/STANDALONE-DOCKER.zh.md)：单独运行 Hub，将 `/salcara-hub/` 反代到独立容器，再把同源管理页添加到 Sub2API 的自定义 iframe 侧边栏。**无需修改官方 Sub2API 或安装服务器插件**；Sub2API 与 Hub 分别升级。0.5.0 管理员只输入随机初始管理密钥登录，可以在后台更换管理密钥；不需要账号或手输管理令牌，不拿模型 Key 或 Sub2API iframe token 当管理员权限。
+
+提供本地审阅后执行的 [首次安装脚本](deploy/standalone/install.sh) 和 [Agent 部署指南](docs/AGENT-DEPLOY.zh.md)。脚本仅拉固定正式镜像，不修改 Nginx、不安装/重启 Docker、不覆盖已有配置或数据卷，结束后列出管理/iframe URL 和受限的初始管理密钥文件位置。旧 0.4.0 须按文档备份后通过完整镜像迁移，不能重新首次安装或用旧管理页应用更新跨过认证变更。
 
 独立源码包含 [Dockerfile](Dockerfile)、[源码 Compose](compose.yml)、[正式镜像 Compose](compose.release.yml)、[Nginx 路径片段](deploy/standalone/nginx-location.conf) 和 [发布构建 CI](.github/workflows/standalone-release.yml)。**一个 Hub 容器**内的非 root 启动器支持网页检查并一键更新签名 Hub 应用，无需第二个更新器容器、不挂 Docker socket；底层镜像/启动器仍通过 Compose 更新，二者不能混称。正式镜像和签名清单以 `standalone-v版本号` 的 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 为准；未完成发布的版本不能当作可下载产物。见 [发布与更新维护](docs/STANDALONE-RELEASE.zh.md)。
 
@@ -44,4 +46,4 @@ go run ./tools/package -output dist/salcara-hub-0.3.1.s2plugin
 
 当前不是端到端加密：HTTPS 保护传输，站点可读取转发内容，使用者须信任站点。手机按需读取/发送，不保持默认常驻 SSE；电脑因 NAT/唤醒仍有轻量连接。断线重试有时限与幂等性边界，不是永久 exactly-once 或永久云端聊天备份。
 
-许可证遵循原 Sub2API 的 LGPLv3 及各依赖许可，见 [LICENSE](LICENSE)。公开仓库不应包含真实模型 Key、设备秘密、手机 token、私钥或服务器配置。
+许可证遵循原 Sub2API 的 LGPLv3 及各依赖许可，见 [LICENSE](LICENSE)。公开仓库不应包含真实模型 Key、设备秘密、手机 token、私钥、管理密钥或服务器配置。

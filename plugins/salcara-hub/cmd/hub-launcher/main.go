@@ -13,7 +13,8 @@ import (
 )
 
 func main() {
-	initToken := flag.Bool("init", false, "Create absent independent admin token without printing or replacing it")
+	initAccount := flag.Bool("init", false, "Create absent management-key credentials and a random initial key in a private file without printing or replacing them")
+	resetKey := flag.Bool("reset-admin-key", false, "Recover an existing management key offline; generate a new random key in the private initial-login file")
 	check := flag.Bool("healthcheck", false, "Check local Hub without loading credentials")
 	version := flag.Bool("version", false, "Print launcher protocol and initial Hub version")
 	flag.Parse()
@@ -21,25 +22,32 @@ func main() {
 		fmt.Printf("launcher_protocol=1 bootstrap_hub=%s\n", standalone.Version)
 		return
 	}
-	if *initToken || *check {
+	if *initAccount || *check || *resetKey {
 		cfg, err := standalone.ConfigFromEnv(os.Getenv)
 		if err != nil {
 			slog.Error("invalid Hub configuration", "error", err)
 			os.Exit(1)
 		}
-		if *initToken && *check {
+		if (*initAccount && *check) || (*resetKey && (*initAccount || *check)) {
 			slog.Error("choose only one operation")
 			os.Exit(1)
 		}
-		if *initToken {
-			if err = os.MkdirAll(cfg.DataDir, 0700); err == nil {
-				err = standalone.InitAdminToken(cfg.AdminTokenFile)
+		if *initAccount {
+			err = standalone.InitAdminAccount(cfg)
+		} else if *resetKey {
+			var warning bool
+			warning, err = standalone.ResetAdminKey(cfg)
+			if err == nil {
+				if warning {
+					slog.Warn("management key was replaced but directory durability is uncertain; inspect storage")
+				}
+				slog.Info("management key replaced; read admin-initial-login.txt privately; key was not printed")
 			}
 		} else {
 			err = standalone.Healthcheck(context.Background(), cfg.Listen)
 		}
 		if err != nil {
-			slog.Error("Hub initialization or health check failed", "error", err)
+			slog.Error("Hub initialization, recovery or health check failed", "error", err)
 			os.Exit(1)
 		}
 		return

@@ -3,8 +3,6 @@ package standalone
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -34,7 +32,7 @@ type Server struct {
 	cfg                 Config
 	hub                 *hub.Hub
 	lock                *dataLock
-	adminDigest         [32]byte
+	auth                *adminAuth
 	closeOnce           sync.Once
 	closeErr            error
 	stopped             atomic.Bool
@@ -47,20 +45,24 @@ func New(cfg Config, logger *slog.Logger) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	token, err := readAdminToken(cfg.AdminTokenFile)
-	if err != nil {
-		return nil, err
-	}
-	defer clear(token)
-	control, err := newControlClient(cfg)
-	if err != nil {
-		return nil, err
-	}
-	if control != nil && sha256.Sum256([]byte(control.token)) == sha256.Sum256(token) {
-		return nil, errors.New("Hub update control credential must differ from the admin credential")
-	}
 	lock, err := acquireDataLock(cfg.DataDir)
 	if err != nil {
+		return nil, err
+	}
+	auth, err := newAdminAuth(cfg)
+	if err != nil {
+		lock.release()
+		return nil, err
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			auth.close()
+		}
+	}()
+	control, err := newControlClient(cfg)
+	if err != nil {
+		lock.release()
 		return nil, err
 	}
 	mode, err := loadResourceMode(cfg.DataDir, cfg.ResourceMode)
@@ -96,12 +98,14 @@ func New(cfg Config, logger *slog.Logger) (*Server, error) {
 	}
 	preset, _ := hub.ResourceMode(mode)
 	previous := debug.SetMemoryLimit(preset.MemoryLimitMiB << 20)
-	return &Server{cfg: cfg, hub: h, lock: lock, adminDigest: sha256.Sum256(token), control: control, previousMemoryLimit: previous}, nil
+	complete = true
+	return &Server{cfg: cfg, hub: h, lock: lock, auth: auth, control: control, previousMemoryLimit: previous}, nil
 }
 
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.stopped.Store(true)
+		s.auth.close()
 		s.resourceMu.Lock()
 		defer s.resourceMu.Unlock()
 		s.hub.Close()
@@ -228,18 +232,6 @@ func (s *Server) serveWeb(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) authenticated(r *http.Request) bool {
-	if len(r.Header.Values("Authorization")) != 1 {
-		return false
-	}
-	kind, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-	if !ok || !strings.EqualFold(kind, "Bearer") || len(token) < 32 || len(token) > 4096 || strings.TrimSpace(token) != token {
-		return false
-	}
-	digest := sha256.Sum256([]byte(token))
-	return subtle.ConstantTimeCompare(digest[:], s.adminDigest[:]) == 1
-}
-
 func origin(u *url.URL) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
 		return "", errors.New("invalid origin")
@@ -265,7 +257,10 @@ func origin(u *url.URL) (string, error) {
 func (s *Server) sameOrigin(r *http.Request) bool {
 	value := r.Header.Get("Origin")
 	if value == "" {
-		return true // non-browser administration over a private TLS connection
+		return false
+	}
+	if len(r.Header.Values("Origin")) != 1 {
+		return false
 	}
 	u, err := url.Parse(value)
 	if err != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" {
@@ -294,13 +289,11 @@ func (s *Server) sameOrigin(r *http.Request) bool {
 }
 
 func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) {
-	if !s.authenticated(r) {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="salcara-hub-admin"`)
-		failure(w, http.StatusUnauthorized, "请输入独立 Hub 管理令牌；不支持中转站登录或模型 API Key")
+	if strings.HasPrefix(r.URL.Path, Prefix+"/_admin/v1/auth/") {
+		s.serveAuth(w, r)
 		return
 	}
-	if !s.sameOrigin(r) {
-		failure(w, http.StatusForbidden, "不允许跨站管理请求")
+	if _, ok := s.authorizeAdmin(w, r); !ok {
 		return
 	}
 	switch r.URL.Path {

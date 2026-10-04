@@ -18,7 +18,7 @@ const (
 	PublisherID      = "salcara-local-20260930"
 	Product          = "salcara-hub-standalone"
 	publicKeyBase64  = "+JTC35ZD2PEJ5TO5ZOQtQTm5BoKDKMH59D6beZbn+gc="
-	defaultFeed      = "https://raw.githubusercontent.com/dkdjndbfj-wq/salcara-hub-plugin/main/updates/standalone.json"
+ defaultFeed      = "https://raw.githubusercontent.com/dkdjndbfj-wq/salcara-hub-plugin/main/updates/standalone-account.json"
 	maxFeedBytes     = 64 << 10
 	maxBinaryBytes   = 64 << 20
 )

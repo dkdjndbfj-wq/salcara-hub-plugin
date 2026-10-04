@@ -21,16 +21,14 @@ func controlFixture(t *testing.T) (*Server, string, string) {
 	cfg := testConfig(t)
 	cfg.ControlSocket = filepath.Join(cfg.DataDir, "control.sock")
 	cfg.ControlTokenFile = filepath.Join(cfg.DataDir, "control-token")
-	for _, path := range []string{cfg.AdminTokenFile, cfg.ControlTokenFile} {
-		if err := InitAdminToken(path); err != nil {
-			t.Fatal(err)
-		}
-	}
-	admin, err := readAdminToken(cfg.AdminTokenFile)
-	if err != nil {
+	if err := InitAdminAccount(cfg); err != nil {
 		t.Fatal(err)
 	}
-	control, err := readAdminToken(cfg.ControlTokenFile)
+	admin := initialPassword(t, cfg)
+	if err := initControlToken(cfg.ControlTokenFile); err != nil {
+		t.Fatal(err)
+	}
+	control, err := readControlToken(cfg.ControlTokenFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +37,7 @@ func controlFixture(t *testing.T) (*Server, string, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return s, string(admin), string(control)
+	return s, admin, string(control)
 }
 
 func controlResponse(status int, body string) *http.Response {
@@ -57,7 +55,7 @@ func TestUpdateControlConfigFailClosed(t *testing.T) {
 		},
 		func(c *Config) {
 			c.ControlSocket = filepath.Join(c.DataDir, "control.sock")
-			c.ControlTokenFile = c.AdminTokenFile
+			c.ControlTokenFile = c.AdminAccountFile
 		},
 	} {
 		invalid := cfg
@@ -66,16 +64,15 @@ func TestUpdateControlConfigFailClosed(t *testing.T) {
 			t.Fatal("unsafe control configuration accepted")
 		}
 	}
-	if err := InitAdminToken(cfg.AdminTokenFile); err != nil {
+	if err := InitAdminAccount(cfg); err != nil {
 		t.Fatal(err)
 	}
 	cfg.ControlSocket, cfg.ControlTokenFile = filepath.Join(cfg.DataDir, "control.sock"), filepath.Join(cfg.DataDir, "control-token")
 	if _, err := New(cfg, nil); err == nil {
 		t.Fatal("missing control secret silently accepted")
 	}
-	// Same secret in a distinct file must not make Hub admin credentials into
-	// launcher credentials. Both files belong solely to this test directory.
-	raw, err := os.ReadFile(cfg.AdminTokenFile)
+	// A password/account record is not a launcher control-plane credential.
+	raw, err := os.ReadFile(cfg.AdminAccountFile)
 	if err != nil {
 		t.Fatal(err)
 	}

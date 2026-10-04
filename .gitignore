@@ -15,3 +15,8 @@ outputs/
 node_modules/
 backend/.installed/
 deploy/config.yaml
+admin-account.json
+admin-initial-login.txt
+salcara-hub-initial-login.txt
+salcara-hub-admin-token.txt
+hub-backup*/

@@ -27,6 +27,10 @@
 **/.env*
 **/*.private.*
 **/admin-token
+**/admin-account.json
+**/admin-initial-login.txt
+**/salcara-hub-initial-login.txt
+**/salcara-hub-admin-token.txt
 **/devices.json
 **/command-receipts.json
 **/command-receipts/**

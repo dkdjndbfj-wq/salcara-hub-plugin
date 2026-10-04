@@ -24,16 +24,16 @@ const Prefix = "/salcara-hub"
 
 // Version is set by the standalone release build via -ldflags -X. The
 // launcher verifies this exact value in /healthz before completing an update.
-var Version = "0.4.0-dev"
+var Version = "0.5.0-dev"
 
 const Product = "salcara-hub-standalone"
 
 const defaultListen = ":8787"
-const defaultTokenFile = "/data/admin-token"
+const defaultAccountFile = "admin-account.json"
 
 type Config struct {
 	DataDir          string
-	AdminTokenFile   string
+	AdminAccountFile string
 	Listen           string
 	PublicURL        string
 	CommandTimeout   time.Duration
@@ -59,7 +59,7 @@ type Config struct {
 // ConfigFromEnv intentionally has no Sub2API URL, API key or legacy-auth
 // switch. An independent deployment never calls the model relay.
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
-	c := Config{DataDir: getenv("SALCARA_HUB_DATA_DIR"), AdminTokenFile: getenv("SALCARA_HUB_ADMIN_TOKEN_FILE"), Listen: getenv("SALCARA_HUB_LISTEN"), PublicURL: getenv("SALCARA_HUB_PUBLIC_URL")}
+	c := Config{DataDir: getenv("SALCARA_HUB_DATA_DIR"), AdminAccountFile: getenv("SALCARA_HUB_ADMIN_ACCOUNT_FILE"), Listen: getenv("SALCARA_HUB_LISTEN"), PublicURL: getenv("SALCARA_HUB_PUBLIC_URL")}
 	c.ControlSocket, c.ControlTokenFile = getenv("SALCARA_HUB_CONTROL_SOCKET"), getenv("SALCARA_HUB_CONTROL_TOKEN_FILE")
 	c.ResourceMode = getenv("SALCARA_HUB_RESOURCE_MODE")
 	c.FCMCredentialsFile = strings.TrimSpace(getenv("SALCARA_HUB_FCM_CREDENTIALS_FILE"))
@@ -70,8 +70,8 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	default:
 		return Config{}, errors.New("SALCARA_HUB_TRUST_PROXY must be true or false")
 	}
-	if c.AdminTokenFile == "" {
-		c.AdminTokenFile = defaultTokenFile
+	if c.AdminAccountFile == "" {
+		c.AdminAccountFile = filepath.Join(c.DataDir, defaultAccountFile)
 	}
 	if c.Listen == "" {
 		c.Listen = defaultListen
@@ -127,13 +127,13 @@ func (c Config) Validate() error {
 	if c.DataDir == "" || !filepath.IsAbs(c.DataDir) || filepath.Clean(c.DataDir) == filepath.VolumeName(c.DataDir)+string(os.PathSeparator) {
 		return errors.New("SALCARA_HUB_DATA_DIR must be an absolute persistent non-root directory")
 	}
-	if c.AdminTokenFile == "" || !filepath.IsAbs(c.AdminTokenFile) {
-		return errors.New("SALCARA_HUB_ADMIN_TOKEN_FILE must be an absolute path")
+	if c.AdminAccountFile == "" || !filepath.IsAbs(c.AdminAccountFile) || filepath.Clean(c.AdminAccountFile) != c.AdminAccountFile || filepath.Dir(c.AdminAccountFile) != filepath.Clean(c.DataDir) || filepath.Base(c.AdminAccountFile) == initialLoginFile || filepath.Base(c.AdminAccountFile) == ".salcara-hub.lock" {
+		return errors.New("SALCARA_HUB_ADMIN_ACCOUNT_FILE must be a clean absolute file path directly inside SALCARA_HUB_DATA_DIR")
 	}
 	if (c.ControlSocket == "") != (c.ControlTokenFile == "") {
 		return errors.New("Hub update control socket and token file must both be configured, or both be absent")
 	}
-	if c.ControlSocket != "" && (!filepath.IsAbs(c.ControlSocket) || !filepath.IsAbs(c.ControlTokenFile) || filepath.Clean(c.ControlSocket) != c.ControlSocket || filepath.Clean(c.ControlTokenFile) != c.ControlTokenFile || c.ControlSocket == c.ControlTokenFile || c.ControlTokenFile == c.AdminTokenFile) {
+	if c.ControlSocket != "" && (!filepath.IsAbs(c.ControlSocket) || !filepath.IsAbs(c.ControlTokenFile) || filepath.Clean(c.ControlSocket) != c.ControlSocket || filepath.Clean(c.ControlTokenFile) != c.ControlTokenFile || c.ControlSocket == c.ControlTokenFile || c.ControlTokenFile == c.AdminAccountFile || c.ControlTokenFile == filepath.Join(c.DataDir, initialLoginFile)) {
 		return errors.New("Hub update control paths must be distinct absolute clean paths, with a separate control credential")
 	}
 	if _, err := healthURL(c.Listen); err != nil {
@@ -184,19 +184,19 @@ func healthURL(listen string) (string, error) {
 	return "http://" + net.JoinHostPort(host, port) + "/healthz", nil
 }
 
-// InitAdminToken only creates an absent secret. It never outputs its value or
-// replaces an existing token; existing pairing state is not read or modified.
-func InitAdminToken(path string) error {
+// initControlToken is solely a test helper for the private launcher control
+// credential. This secret is never a browser administrator credential.
+func initControlToken(path string) error {
 	if !filepath.IsAbs(path) {
-		return errors.New("admin token path must be absolute")
+		return errors.New("private launcher control token path must be absolute")
 	}
 	var random [32]byte
 	if _, err := rand.Read(random[:]); err != nil {
-		return errors.New("cannot generate admin token")
+		return errors.New("cannot generate private launcher control token")
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		return fmt.Errorf("cannot create new admin token file: %w", err)
+		return fmt.Errorf("cannot create new private launcher control token file: %w", err)
 	}
 	_, writeErr := io.WriteString(f, hex.EncodeToString(random[:])+"\n")
 	if writeErr == nil {
@@ -205,40 +205,36 @@ func InitAdminToken(path string) error {
 	closeErr := f.Close()
 	if writeErr != nil || closeErr != nil {
 		// Keep even an incomplete file rather than silently replacing a secret.
-		return errors.New("admin token file could not be saved; inspect the file before retrying initialization")
+		return errors.New("private launcher control token file could not be saved; inspect it before retrying")
 	}
 	return nil
 }
 
-func readAdminToken(path string) ([]byte, error) {
+func readControlToken(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 4098 || info.Size() < 32 {
-		return nil, errors.New("admin token file must be a regular file containing a random token of at least 32 bytes; run -init first")
+		return nil, errors.New("private launcher control token must be stored in a small regular file")
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
-		return nil, errors.New("admin token file must not be readable or writable by group or other users (use mode 0600 or 0400)")
+		return nil, errors.New("private launcher control token file must not be readable or writable by group or other users (use mode 0600 or 0400)")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, errors.New("admin token file is not readable")
+		return nil, errors.New("private launcher control token file is not readable")
 	}
 	defer f.Close()
 	opened, statErr := f.Stat()
 	if statErr != nil || !os.SameFile(info, opened) {
-		return nil, errors.New("admin token file changed while opening")
+		return nil, errors.New("private launcher control token file changed while opening")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 4099))
 	if err != nil || len(data) > 4098 {
-		return nil, errors.New("invalid admin token file")
+		return nil, errors.New("invalid private launcher control token file")
 	}
 	token := strings.TrimSpace(string(data))
-	if len(token) < 32 || len(token) > 4096 || strings.HasPrefix(strings.ToLower(token), "sk-") || strings.Contains(strings.ToLower(token), "bearer") {
-		return nil, errors.New("admin token must be an independent random secret, not a model API key")
-	}
-	for _, ch := range token {
-		if ch < 0x21 || ch > 0x7e {
-			return nil, errors.New("admin token must contain printable ASCII without spaces")
-		}
+	decoded, decodeErr := hex.DecodeString(token)
+	if len(token) != 64 || decodeErr != nil || len(decoded) != 32 {
+		return nil, errors.New("private launcher control token must be an independent 256-bit hexadecimal secret")
 	}
 	return []byte(token), nil
 }

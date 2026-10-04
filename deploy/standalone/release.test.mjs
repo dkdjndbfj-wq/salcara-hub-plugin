@@ -57,7 +57,7 @@ test('release configuration cannot overwrite the plugin or personal feed', () =>
   assert.ok(!workflow.includes('secrets.SALCARA'));
   assert.ok(!workflow.includes('gh release create'));
   const source = readFileSync(new URL('../../plugins/salcara-hub/internal/launcher/config.go', import.meta.url), 'utf8');
-  assert.ok(source.includes('main/updates/standalone.json'));
+  assert.ok(source.includes('main/updates/standalone-account.json'));
   assert.ok(source.includes('Product          = "salcara-hub-standalone"'));
 });
 

@@ -16,16 +16,14 @@ func TestUpdateRealUnixSocketIgnoresProxyAndKeepsControlTokenPrivate(t *testing.
 	cfg := testConfig(t)
 	cfg.ControlSocket = filepath.Join(cfg.DataDir, "control.sock")
 	cfg.ControlTokenFile = filepath.Join(cfg.DataDir, "control-token")
-	for _, path := range []string{cfg.AdminTokenFile, cfg.ControlTokenFile} {
-		if err := InitAdminToken(path); err != nil {
-			t.Fatal(err)
-		}
-	}
-	admin, err := readAdminToken(cfg.AdminTokenFile)
-	if err != nil {
+	if err := InitAdminAccount(cfg); err != nil {
 		t.Fatal(err)
 	}
-	control, err := readAdminToken(cfg.ControlTokenFile)
+	admin := initialPassword(t, cfg)
+	if err := initControlToken(cfg.ControlTokenFile); err != nil {
+		t.Fatal(err)
+	}
+	control, err := readControlToken(cfg.ControlTokenFile)
 	if err != nil {
 		t.Fatal(err)
 	}

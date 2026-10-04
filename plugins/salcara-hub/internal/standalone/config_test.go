@@ -3,7 +3,6 @@ package standalone
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,14 +16,14 @@ import (
 func testConfig(t *testing.T) Config {
 	t.Helper()
 	dir := t.TempDir()
-	return Config{DataDir: dir, AdminTokenFile: filepath.Join(dir, "admin-token"), Listen: ":8787", CommandTimeout: time.Second, PingInterval: 5 * time.Second}
+	return Config{DataDir: dir, AdminAccountFile: filepath.Join(dir, defaultAccountFile), Listen: ":8787", CommandTimeout: time.Second, PingInterval: 5 * time.Second}
 }
 
 func TestEnvConfigAndOriginValidation(t *testing.T) {
 	dir := t.TempDir()
-	base := map[string]string{"SALCARA_HUB_DATA_DIR": dir, "SALCARA_HUB_ADMIN_TOKEN_FILE": filepath.Join(dir, "admin-token")}
+	base := map[string]string{"SALCARA_HUB_DATA_DIR": dir, "SALCARA_HUB_ADMIN_ACCOUNT_FILE": filepath.Join(dir, defaultAccountFile)}
 	cfg, err := ConfigFromEnv(func(key string) string { return base[key] })
-	if err != nil || cfg.Listen != ":8787" || cfg.AdminTokenFile != base["SALCARA_HUB_ADMIN_TOKEN_FILE"] {
+	if err != nil || cfg.Listen != ":8787" || cfg.AdminAccountFile != base["SALCARA_HUB_ADMIN_ACCOUNT_FILE"] {
 		t.Fatalf("unexpected defaults: %v", err)
 	}
 	for _, tc := range []struct{ key, value string }{
@@ -37,7 +36,7 @@ func TestEnvConfigAndOriginValidation(t *testing.T) {
 		{"SALCARA_HUB_PUBLIC_URL", "https://example.com/other"},
 		{"SALCARA_HUB_PUBLIC_URL", "https://example.com:70000/salcara-hub"},
 	} {
-		values := map[string]string{"SALCARA_HUB_DATA_DIR": dir, "SALCARA_HUB_ADMIN_TOKEN_FILE": filepath.Join(dir, "admin-token")}
+		values := map[string]string{"SALCARA_HUB_DATA_DIR": dir, "SALCARA_HUB_ADMIN_ACCOUNT_FILE": filepath.Join(dir, defaultAccountFile)}
 		values[tc.key] = tc.value
 		if _, err := ConfigFromEnv(func(key string) string { return values[key] }); err == nil {
 			t.Fatalf("invalid configuration accepted for %s", tc.key)
@@ -51,37 +50,42 @@ func TestEnvConfigAndOriginValidation(t *testing.T) {
 	}
 }
 
-func TestTokenInitializationDoesNotReplaceAndRejectsUnsafeFiles(t *testing.T) {
+func TestAccountInitializationDoesNotReplaceAndRejectsUnsafeFiles(t *testing.T) {
 	cfg := testConfig(t)
-	if err := InitAdminToken(cfg.AdminTokenFile); err != nil {
+	if err := InitAdminAccount(cfg); err != nil {
 		t.Fatal(err)
 	}
-	before, err := readAdminToken(cfg.AdminTokenFile)
-	if err != nil || len(before) != 64 {
-		t.Fatal("initialized token not accepted")
+	root, err := openAuthRoot(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := InitAdminToken(cfg.AdminTokenFile); err == nil {
-		t.Fatal("existing admin token replaced")
+	defer root.Close()
+	before, err := loadAdminAccount(root, defaultAccountFile)
+	if err != nil || !verifyPassword(before, initialPassword(t, cfg)) {
+		t.Fatal("initialized account not accepted")
 	}
-	after, err := readAdminToken(cfg.AdminTokenFile)
-	if err != nil || sha256.Sum256(before) != sha256.Sum256(after) {
-		t.Fatal("existing token changed")
+	if err := InitAdminAccount(cfg); err == nil {
+		t.Fatal("existing admin account replaced")
+	}
+	after, err := loadAdminAccount(root, defaultAccountFile)
+	if err != nil || before != after {
+		t.Fatal("existing account changed")
 	}
 	if runtime.GOOS != "windows" {
-		if err := os.Chmod(cfg.AdminTokenFile, 0644); err != nil {
+		if err := os.Chmod(cfg.AdminAccountFile, 0644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := readAdminToken(cfg.AdminTokenFile); err == nil {
+		if _, err := loadAdminAccount(root, defaultAccountFile); err == nil {
 			t.Fatal("world-readable secret accepted")
 		}
-		if err := os.Chmod(cfg.AdminTokenFile, 0600); err != nil {
+		if err := os.Chmod(cfg.AdminAccountFile, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	link := filepath.Join(cfg.DataDir, "token-link")
-	if err := os.Symlink(cfg.AdminTokenFile, link); err == nil {
-		if _, err := readAdminToken(link); err == nil {
-			t.Fatal("token symlink accepted")
+	link := filepath.Join(cfg.DataDir, "account-link")
+	if err := os.Symlink(cfg.AdminAccountFile, link); err == nil {
+		if _, err := loadAdminAccount(root, "account-link"); err == nil {
+			t.Fatal("account symlink accepted")
 		}
 	}
 	// Test-only fixtures are independent fake strings, not local model keys.
@@ -90,7 +94,7 @@ func TestTokenInitializationDoesNotReplaceAndRejectsUnsafeFiles(t *testing.T) {
 		if err := os.WriteFile(path, []byte(fake), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := readAdminToken(path); err == nil {
+		if _, err := loadAdminAccount(root, filepath.Base(path)); err == nil {
 			t.Fatal("unsafe test token accepted")
 		}
 	}
@@ -168,7 +172,7 @@ func TestDataLockReleasesAfterProcessCrash(t *testing.T) {
 
 func TestTrustProxyIsExplicitAndValidated(t *testing.T) {
 	dir := t.TempDir()
-	base := map[string]string{"SALCARA_HUB_DATA_DIR": dir, "SALCARA_HUB_ADMIN_TOKEN_FILE": filepath.Join(dir, "admin-token")}
+	base := map[string]string{"SALCARA_HUB_DATA_DIR": dir, "SALCARA_HUB_ADMIN_ACCOUNT_FILE": filepath.Join(dir, defaultAccountFile)}
 	get := func(extra map[string]string) func(string) string {
 		return func(k string) string {
 			if v, ok := extra[k]; ok {

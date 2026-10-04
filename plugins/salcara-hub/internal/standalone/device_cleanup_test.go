@@ -67,7 +67,7 @@ func TestDeviceCleanupSettingPersistsAcrossRestartAndValidates(t *testing.T) {
 
 func TestCleanupDaysFromEnvironment(t *testing.T) {
 	base := map[string]string{"SALCARA_HUB_DATA_DIR": t.TempDir()}
-	base["SALCARA_HUB_ADMIN_TOKEN_FILE"] = filepath.Join(base["SALCARA_HUB_DATA_DIR"], "admin-token")
+	base["SALCARA_HUB_ADMIN_ACCOUNT_FILE"] = filepath.Join(base["SALCARA_HUB_DATA_DIR"], defaultAccountFile)
 	get := func(extra map[string]string) func(string) string {
 		return func(k string) string {
 			if v, ok := extra[k]; ok {

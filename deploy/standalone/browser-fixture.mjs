@@ -1,10 +1,23 @@
 // Local browser QA only: refuses every server except the dedicated test port
-// authenticated with the repository's NON-PRODUCTION preview fixture token.
+// authenticated using a newly generated preview password in a labelled temp dir.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { readFileSync, lstatSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, basename, relative, resolve, sep } from 'node:path';
 const base = 'http://127.0.0.1:19877/salcara-hub';
-const admin = 'salcara-preview-only-not-for-real-deployment-0000000000000000000000';
-const headers = { Authorization: `Bearer ${admin}` };
+const passwordFile = resolve(process.argv[2] || '.');
+const delta = relative(realpathSync(tmpdir()), realpathSync(passwordFile));
+assert.ok(delta && !delta.startsWith('..') && !delta.startsWith(sep));
+assert.ok(basename(dirname(passwordFile)).startsWith('salcara-hub-preview-'));
+assert.equal(basename(passwordFile), 'admin-initial-login.txt');
+assert.ok(lstatSync(passwordFile).isFile() && !lstatSync(passwordFile).isSymbolicLink());
+const login = await fetch(`${base}/_admin/v1/auth/login`, {
+  method: 'POST', headers: { Origin: 'http://127.0.0.1:19877', 'Content-Type': 'application/json' },
+  body: JSON.stringify({ password: readFileSync(passwordFile, 'utf8').trim() }),
+});
+assert.equal(login.status, 200, 'refusing to seed any non-preview Hub');
+const headers = { Cookie: login.headers.get('set-cookie').split(';')[0] };
 const before = await fetch(`${base}/_admin/v1/state`, { headers });
 assert.equal(before.status, 200, 'refusing to seed any non-preview Hub');
 const abort = new AbortController();

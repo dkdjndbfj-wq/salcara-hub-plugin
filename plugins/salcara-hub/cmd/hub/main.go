@@ -13,7 +13,8 @@ import (
 )
 
 func main() {
-	initToken := flag.Bool("init", false, "Create an absent independent admin token; never print or replace it")
+	initAccount := flag.Bool("init", false, "Create absent management-key credentials and a random initial key in a private file; never print or replace them")
+	resetKey := flag.Bool("reset-admin-key", false, "Recover an existing management key offline; generate a new random key in the private initial-login file")
 	check := flag.Bool("healthcheck", false, "Check the local Hub without loading secrets")
 	version := flag.Bool("version", false, "Print standalone Hub version")
 	flag.Parse()
@@ -26,21 +27,29 @@ func main() {
 		slog.Error("Hub configuration is invalid", "error", err)
 		os.Exit(1)
 	}
-	if *initToken && *check {
-		slog.Error("choose only one of -init and -healthcheck")
+	if (*initAccount && *check) || (*resetKey && (*initAccount || *check)) {
+		slog.Error("choose only one of -init, -reset-admin-key and -healthcheck")
 		os.Exit(1)
 	}
-	if *initToken {
-		// Only the explicitly configured directory is prepared. O_EXCL keeps
-		// an existing token unchanged; its content is never sent to stdout.
-		if err = os.MkdirAll(cfg.DataDir, 0700); err == nil {
-			err = standalone.InitAdminToken(cfg.AdminTokenFile)
-		}
+	if *initAccount {
+		err = standalone.InitAdminAccount(cfg)
 		if err != nil {
-			slog.Error("Hub token initialization failed", "error", err)
+			slog.Error("Hub administrator initialization failed", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("independent Hub admin token created; token value was not printed")
+		slog.Info("Hub management key initialized; read admin-initial-login.txt privately; key was not printed")
+		return
+	}
+	if *resetKey {
+		warning, err := standalone.ResetAdminKey(cfg)
+		if err != nil {
+			slog.Error("Hub management key recovery failed", "error", err)
+			os.Exit(1)
+		}
+		if warning {
+			slog.Warn("management key was replaced but directory durability is uncertain; inspect storage")
+		}
+		slog.Info("management key replaced; read admin-initial-login.txt privately; key was not printed")
 		return
 	}
 	if *check {
