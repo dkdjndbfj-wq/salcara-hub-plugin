@@ -85,6 +85,10 @@ curl() {
     case "$endpoint" in
         'https://api.github.com/repos/dkdjndbfj-wq/salcara-hub-plugin/releases/tags/standalone-v0.5.1')
             [[ "$stub_mode" != missing_release ]] || return 22
+            if [[ "$stub_mode" == wrong_release ]]; then
+                printf '{"tag_name":"standalone-v0.5.0","draft":false,"prerelease":false}\n'
+                return
+            fi
             printf '{"tag_name":"standalone-v0.5.1","draft":false,"prerelease":false}\n' ;;
         'http://127.0.0.1:8787/healthz')
             if [[ "$stub_mode" == wrong_health ]]; then
@@ -141,6 +145,8 @@ stub_mode=existing_volume
 expect_failure 'existing Hub volume refused' '已有 Hub 数据卷' --public-url "$public_url" --install-dir "$test_target"
 stub_mode=missing_release
 expect_failure 'missing Release fails before files/init' '正式 Release 不存在或不可达' --public-url "$public_url" --install-dir "$test_target"
+stub_mode=wrong_release
+expect_failure 'wrong Release version fails before files/init' 'Release 标签不匹配' --public-url "$public_url" --install-dir "$test_target"
 
 # Test initialization gating after a mocked network failure. All filesystem
 # writes below are inside this test's new, dedicated sandbox.

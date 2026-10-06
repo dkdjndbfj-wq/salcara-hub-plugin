@@ -5,6 +5,7 @@ set -Eeuo pipefail
 umask 077
 
 readonly version=0.5.1
+readonly version_pattern=${version//./\\.}
 readonly project=salcara-hub-standalone
 readonly image="ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:$version"
 readonly volume="${project}_hub-data"
@@ -113,7 +114,7 @@ source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 # abort before creating an installation directory or initializing a data volume.
 release=$(curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 30 \
     "https://api.github.com/repos/dkdjndbfj-wq/salcara-hub-plugin/releases/tags/standalone-v$version") || die '正式 Release 不存在或不可达。'
-grep -Eq '"tag_name"[[:space:]]*:[[:space:]]*"standalone-v0\.5\.0"' <<< "$release" || die 'Release 标签不匹配。'
+grep -Eq "\"tag_name\"[[:space:]]*:[[:space:]]*\"standalone-v${version_pattern}\"" <<< "$release" || die 'Release 标签不匹配。'
 grep -Eq '"draft"[[:space:]]*:[[:space:]]*false' <<< "$release" || die '不是公开正式 Release。'
 grep -Eq '"prerelease"[[:space:]]*:[[:space:]]*false' <<< "$release" || die '不安装预发布版本。'
 
@@ -146,7 +147,7 @@ healthy=false
 for attempt in {1..15}; do
     if health=$(curl --fail --silent --show-error --max-time 2 'http://127.0.0.1:8787/healthz' 2>/dev/null) &&
        printf '%s\n' "$health" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"salcara-hub-standalone"' &&
-       printf '%s\n' "$health" | grep -Eq '"version"[[:space:]]*:[[:space:]]*"0\.5\.0"' &&
+       printf '%s\n' "$health" | grep -Eq "\"version\"[[:space:]]*:[[:space:]]*\"${version_pattern}\"" &&
        printf '%s\n' "$health" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
         healthy=true; break
     fi
