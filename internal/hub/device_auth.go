@@ -192,11 +192,21 @@ func (h *Hub) handleQRPair(w http.ResponseWriter, r *http.Request, _ string) {
 	var in struct {
 		DeviceID string `json:"deviceId"`
 		Ticket   string `json:"ticket"`
+		PhoneID  string `json:"phoneId"`
 	}
 	if !decodeBody(w, r, maxDefaultBody, &in) {
 		return
 	}
 	decoded, err := hex.DecodeString(in.Ticket)
+	phoneHash := ""
+	if in.PhoneID != "" {
+		if !validPairHash(in.PhoneID) {
+			writeError(w, 400, "手机配对身份无效")
+			return
+		}
+		hash := sha256.Sum256([]byte(in.PhoneID))
+		phoneHash = hex.EncodeToString(hash[:])
+	}
 	if !validID(in.DeviceID) || err != nil || len(decoded) != 32 {
 		h.limiter.fail(ip)
 		writeError(w, 403, "二维码无效或已过期")
@@ -211,15 +221,40 @@ func (h *Hub) handleQRPair(w http.ResponseWriter, r *http.Request, _ string) {
 	h.mu.Lock()
 	var accountID string
 	var matched *device
+	var bindingID string
+	var computerID string
+	var attemptID string
 	if key, ok := h.pairTickets[hash]; ok {
 		attempt := h.pairCodes[key]
 		parts := strings.SplitN(key, "\x00", 2)
 		if attempt != nil && len(parts) == 2 && parts[1] == in.DeviceID {
+			// An attempt carrying a phone hash is restricted to that
+			// installation. After a local revoke the desktop starts a fresh
+			// binding generation with an empty hash; that is a legitimate rebind
+			// window, but it must not be usable while the device is still paired.
+			activePair := false
+			if a := h.accounts[parts[0]]; a != nil {
+				if current := a.devices[in.DeviceID]; current != nil {
+					activePair = current.hasPair
+				}
+			}
+			phoneMismatch := attempt.phoneHash != "" && (phoneHash == "" || subtle.ConstantTimeCompare([]byte(phoneHash), []byte(attempt.phoneHash)) != 1)
+			phoneMissing := attempt.bindingID != "" && phoneHash == ""
+			emptyHashActivePair := attempt.phoneHash == "" && activePair
+			if attempt.bindingID != "" && (phoneMissing || phoneMismatch || emptyHashActivePair) {
+				h.mu.Unlock()
+				h.limiter.fail(ip)
+				writeError(w, 403, "这台电脑已绑定另一台手机，请先在电脑解除绑定")
+				return
+			}
 			if time.Now().After(attempt.expires) {
 				h.deletePairAttemptLocked(key)
 			} else if a := h.accounts[parts[0]]; a != nil {
 				matched = a.devices[in.DeviceID]
-				if matched != nil && matched.conn != nil {
+				if matched != nil && matched.conn != nil && !matched.banned {
+					bindingID = attempt.bindingID
+					computerID = attempt.computerID
+					attemptID = attempt.attemptID
 					accountID = parts[0]
 					h.deletePairAttemptLocked(key) // atomic, single-use claim
 				}
@@ -233,6 +268,8 @@ func (h *Hub) handleQRPair(w http.ResponseWriter, r *http.Request, _ string) {
 		return
 	}
 	h.setPairLocked(accountID, matched, sha256.Sum256([]byte(token)), true)
+	matched.bindingID, matched.phoneHash = bindingID, phoneHash
+	matched.pairAttemptID = attemptID
 	for sub := range h.accounts[accountID].apps {
 		if sub.deviceID == in.DeviceID {
 			delete(h.accounts[accountID].apps, sub)
@@ -242,5 +279,5 @@ func (h *Hub) handleQRPair(w http.ResponseWriter, r *http.Request, _ string) {
 	status := matched.status()
 	h.mu.Unlock()
 	h.markDirty()
-	writeJSON(w, 200, map[string]any{"pair_token": token, "device": status})
+	writeJSON(w, 200, map[string]any{"pair_token": token, "device": status, "computerId": computerID})
 }

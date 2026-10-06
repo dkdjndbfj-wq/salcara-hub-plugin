@@ -137,9 +137,10 @@ type appSub struct {
 func (s *appSub) close() { s.once.Do(func() { close(s.closed) }) }
 
 type bridgeConn struct {
-	cmds   chan []byte
-	closed chan struct{}
-	once   sync.Once
+	cmds        chan []byte
+	pairChanged chan struct{} // coalesced state, separate from command capacity
+	closed      chan struct{}
+	once        sync.Once
 }
 
 func (c *bridgeConn) close() { c.once.Do(func() { close(c.closed) }) }
@@ -153,6 +154,10 @@ type device struct {
 	hasSecret     bool
 	pairHash      [32]byte
 	hasPair       bool
+	pairRevision  int64
+	phoneHash     string
+	bindingID     string
+	pairAttemptID string
 	lastAppSeen   int64 // last request from the paired phone (memory only); push waits while it is active
 	banned        bool
 	banReason     string
@@ -190,6 +195,17 @@ type account struct {
 	// wake is closed (and replaced) whenever an event is appended, waking
 	// phones long-polling /app/events. Lazily created under h.mu.
 	wake chan struct{}
+	// Event upload batches are acknowledged in memory so a lost HTTP response
+	// can be retried without appending the same timeline events twice. The
+	// payload digest prevents reusing one batch ID for different content.
+	eventBatches    map[string]eventBatchReceipt
+	eventBatchOrder []string
+}
+
+type eventBatchReceipt struct {
+	digest   string
+	accepted int
+	lastSeq  int64
 }
 
 // wakeChanLocked returns the channel closed by the next appended event.
@@ -198,6 +214,19 @@ func (a *account) wakeChanLocked() chan struct{} {
 		a.wake = make(chan struct{})
 	}
 	return a.wake
+}
+
+// wakeEventWaitersLocked wakes phones that are holding an empty /app/events
+// long-poll even when no conversation event was appended. Pair/revoke state is
+// authorization state too: without this notification a revoked phone could
+// remain blocked for the full wait timeout before learning that it was
+// detached.
+func (a *account) wakeEventWaitersLocked() {
+	if a == nil || a.wake == nil {
+		return
+	}
+	close(a.wake)
+	a.wake = nil
 }
 
 func sessionID(deviceID, sessionKey string) string { return deviceID + "\x00" + sessionKey }
@@ -209,13 +238,14 @@ func (h *Hub) accountLocked(id string) *account {
 	a := h.accounts[id]
 	if a == nil {
 		a = &account{
-			owner:    h,
-			resource: h.resource,
-			id:       id,
-			devices:  map[string]*device{},
-			seq:      h.seqBase,
-			sessions: map[string]*sessionBuf{},
-			apps:     map[*appSub]struct{}{},
+			owner:        h,
+			resource:     h.resource,
+			id:           id,
+			devices:      map[string]*device{},
+			seq:          h.seqBase,
+			sessions:     map[string]*sessionBuf{},
+			apps:         map[*appSub]struct{}{},
+			eventBatches: map[string]eventBatchReceipt{},
 		}
 		h.accounts[id] = a
 	}

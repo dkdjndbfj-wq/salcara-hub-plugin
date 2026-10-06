@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -113,6 +114,7 @@ func New(cfg Config) (*Hub, error) {
 		"/me":                 {http.MethodGet, true, h.handleMe},
 		"/bridge/register":    {http.MethodPost, true, h.handleRegister},
 		"/bridge/stream":      {http.MethodGet, true, h.handleBridgeStream},
+		"/bridge/pair/status": {http.MethodGet, true, h.handlePairStatus},
 		"/bridge/events":      {http.MethodPost, true, h.handleBridgeEvents},
 		"/bridge/reply":       {http.MethodPost, true, h.handleBridgeReply},
 		"/bridge/pair/start":  {http.MethodPost, true, h.handlePairStart},
@@ -440,7 +442,7 @@ func (s *sseWriter) send(event string, data []byte) error {
 
 func (h *Hub) handlePing(w http.ResponseWriter, _ *http.Request, _ string) {
 	caps, ttl := h.commandCapabilities()
-	caps = append([]string{"device.identity.v1", "pair.qr.v1", "session.remote.v1", "pair.revoke.v1"}, caps...)
+	caps = append([]string{"device.identity.v1", "pair.qr.v1", "session.remote.v1", "pair.revoke.v1", "pair.status.v1", "pair.single-phone.v1"}, caps...)
 	if h.push.enabled() {
 		caps = append(caps, "push.fcm.v1")
 	}
@@ -522,7 +524,7 @@ func (h *Hub) handleBridgeStream(w http.ResponseWriter, r *http.Request, acct st
 		writeError(w, http.StatusTooManyRequests, "本站电脑连接已达当前资源模式上限，请稍后重试")
 		return
 	}
-	conn := &bridgeConn{cmds: make(chan []byte, h.resource.BridgeQueueMessages), closed: make(chan struct{})}
+	conn := &bridgeConn{cmds: make(chan []byte, h.resource.BridgeQueueMessages), closed: make(chan struct{}), pairChanged: make(chan struct{}, 1)}
 	old := dev.conn
 	dev.conn = conn
 	dev.lastSeen = nowMs()
@@ -550,12 +552,40 @@ func (h *Hub) handleBridgeStream(w http.ResponseWriter, r *http.Request, acct st
 	if sse.comment("connected") != nil {
 		return
 	}
+	// Initial snapshot restores state after reconnect; changes ride the already
+	// open Bridge stream, with no extra polling connections on the server.
+	sendPair := func() error {
+		h.mu.Lock()
+		state := h.pairStateLocked(acct, dev)
+		h.mu.Unlock()
+		data, _ := json.Marshal(state)
+		return sse.send("pair.status", data)
+	}
+	if sendPair() != nil {
+		return
+	}
 	ping := time.NewTicker(h.cfg.PingInterval)
 	defer ping.Stop()
 	for {
 		select {
 		case env := <-conn.cmds:
+			// A phone command can arrive immediately after claiming the QR. Put
+			// the authenticated pair snapshot on the same ordered SSE stream
+			// before that command so the bridge installs its phone identity before
+			// attempting the read/write.
+			var peek struct {
+				Phone bool `json:"phone"`
+			}
+			if json.Unmarshal(env, &peek) == nil && peek.Phone {
+				if sendPair() != nil {
+					return
+				}
+			}
 			if sse.send("command", env) != nil {
+				return
+			}
+		case <-conn.pairChanged:
+			if sendPair() != nil {
 				return
 			}
 		case <-ping.C:
@@ -581,6 +611,7 @@ func (h *Hub) handleBridgeStream(w http.ResponseWriter, r *http.Request, acct st
 
 type eventsBody struct {
 	DeviceID string            `json:"deviceId"`
+	BatchID  string            `json:"batchId,omitempty"`
 	Events   []json.RawMessage `json:"events"`
 }
 
@@ -591,6 +622,10 @@ func (h *Hub) handleBridgeEvents(w http.ResponseWriter, r *http.Request, acct st
 	}
 	if !validID(body.DeviceID) {
 		writeError(w, http.StatusBadRequest, "deviceId 不能为空")
+		return
+	}
+	if body.BatchID != "" && !requestUUID.MatchString(body.BatchID) {
+		writeError(w, http.StatusBadRequest, "batchId 必须是标准小写 UUID")
 		return
 	}
 	parsed := make([]map[string]json.RawMessage, 0, len(body.Events))
@@ -637,6 +672,28 @@ func (h *Hub) handleBridgeEvents(w http.ResponseWriter, r *http.Request, acct st
 	}
 	dev.lastSeen = nowMs()
 	var last int64
+	// A revoked station must not receive fresh conversation events. This also
+	// closes the race between a local authorization check and the HTTP upload.
+	if dev.bindingID != "" && (!dev.hasPair || r.Header.Get("X-Salcara-Binding-Id") != dev.bindingID || r.Header.Get("X-Salcara-Phone-Hash") != dev.phoneHash) {
+		h.mu.Unlock()
+		writeError(w, 403, "手机绑定已更换或撤销")
+		return
+	}
+	digestInput, _ := json.Marshal(body.Events)
+	digestBytes := sha256.Sum256(append([]byte(body.DeviceID+"\x00"), digestInput...))
+	digest := hex.EncodeToString(digestBytes[:])
+	if body.BatchID != "" {
+		if receipt, ok := a.eventBatches[body.BatchID]; ok {
+			if receipt.digest != digest {
+				h.mu.Unlock()
+				writeError(w, http.StatusConflict, "事件批次编号已用于其他内容")
+				return
+			}
+			h.mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": receipt.accepted, "lastSeq": receipt.lastSeq, "duplicate": true})
+			return
+		}
+	}
 	for _, m := range parsed {
 		e, err := a.appendEventLocked(body.DeviceID, m)
 		if err != nil {
@@ -644,6 +701,18 @@ func (h *Hub) handleBridgeEvents(w http.ResponseWriter, r *http.Request, acct st
 		}
 		last = e.seq
 		h.pushEventLocked(acct, a, dev, m, e.seq)
+	}
+	if body.BatchID != "" {
+		if a.eventBatches == nil {
+			a.eventBatches = map[string]eventBatchReceipt{}
+		}
+		a.eventBatches[body.BatchID] = eventBatchReceipt{digest: digest, accepted: len(parsed), lastSeq: last}
+		a.eventBatchOrder = append(a.eventBatchOrder, body.BatchID)
+		if len(a.eventBatchOrder) > 256 {
+			old := a.eventBatchOrder[0]
+			a.eventBatchOrder = a.eventBatchOrder[1:]
+			delete(a.eventBatches, old)
+		}
 	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": len(parsed), "lastSeq": last})
@@ -847,6 +916,9 @@ type commandEnvelope struct {
 	DeviceID  string          `json:"deviceId"`
 	Command   json.RawMessage `json:"command"`
 	TS        int64           `json:"ts"`
+	BindingID string          `json:"bindingId,omitempty"`
+	PhoneHash string          `json:"phoneHash,omitempty"`
+	Phone     bool            `json:"phone,omitempty"`
 }
 
 func (h *Hub) handleAppCommands(w http.ResponseWriter, r *http.Request, acct string) {
@@ -930,6 +1002,17 @@ func (h *Hub) handleAppEvents(w http.ResponseWriter, r *http.Request, acct strin
 		select {
 		case <-wake:
 		case <-deadline.C:
+			// The pair may have been revoked at the same time as the timer. Do
+			// one final authorization check before returning an empty page; a
+			// timeout must never turn a revoked token into a successful read.
+			h.mu.Lock()
+			a = h.accounts[acct]
+			authorized := a != nil && a.devices[deviceID] != nil && h.pairedDeviceLocked(acct, r) == a.devices[deviceID]
+			h.mu.Unlock()
+			if !authorized {
+				writeError(w, http.StatusForbidden, "这台电脑尚未与手机配对")
+				return
+			}
 			writeJSON(w, http.StatusOK, page)
 			return
 		case <-r.Context().Done():

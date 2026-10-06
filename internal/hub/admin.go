@@ -314,7 +314,6 @@ func (h *Hub) executeCommand(ctx context.Context, accountID, deviceID string, co
 	}
 	_ = json.Unmarshal(command, &typ)
 	id := newID()
-	env, _ := json.Marshal(commandEnvelope{CommandID: id, DeviceID: deviceID, Command: command, TS: nowMs()})
 	p := &pendingCmd{account: accountID, deviceID: deviceID, ch: make(chan replyBody, 1)}
 	h.mu.Lock()
 	a := h.accounts[accountID]
@@ -340,6 +339,13 @@ func (h *Hub) executeCommand(ctx context.Context, accountID, deviceID string, co
 		return replyBody{Error: "请求已取消"}, 499
 	}
 	h.pending[id] = p
+	// Binding metadata comes from the authenticated station record, never the
+	// phone's command JSON. Administrator diagnostics do not grant phone access.
+	envelope := commandEnvelope{CommandID: id, DeviceID: deviceID, Command: command, TS: nowMs(), Phone: authorize != nil}
+	if authorize != nil {
+		envelope.BindingID, envelope.PhoneHash = dev.bindingID, dev.phoneHash
+	}
+	env, _ := json.Marshal(envelope)
 	h.mu.Unlock()
 	defer func() { h.mu.Lock(); delete(h.pending, id); h.mu.Unlock() }()
 	started := time.Now()

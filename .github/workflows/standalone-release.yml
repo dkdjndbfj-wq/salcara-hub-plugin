@@ -5,7 +5,7 @@ on:
       version:
         description: Bare stable version, matching the standalone release tag
         required: true
-        default: '0.5.0'
+        default: '0.5.1'
       publish_image:
         description: Publish the tested image to GHCR (does not deploy a server)
         type: boolean

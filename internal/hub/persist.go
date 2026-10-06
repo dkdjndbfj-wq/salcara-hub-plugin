@@ -13,13 +13,16 @@ import (
 const devicesFile = "devices.json"
 
 type persistedDevice struct {
-	Device     Device `json:"device"`
-	LastSeen   int64  `json:"lastSeen"`
-	SecretHash string `json:"secretHash,omitempty"`
-	PairHash   string `json:"pairHash,omitempty"`
-	Banned     bool   `json:"banned,omitempty"`
-	BanReason  string `json:"banReason,omitempty"`
-	BannedAt   int64  `json:"bannedAt,omitempty"`
+	Device        Device `json:"device"`
+	LastSeen      int64  `json:"lastSeen"`
+	SecretHash    string `json:"secretHash,omitempty"`
+	PairHash      string `json:"pairHash,omitempty"`
+	PhoneHash     string `json:"phoneHash,omitempty"`
+	BindingID     string `json:"bindingId,omitempty"`
+	PairAttemptID string `json:"pairAttemptId,omitempty"`
+	Banned        bool   `json:"banned,omitempty"`
+	BanReason     string `json:"banReason,omitempty"`
+	BannedAt      int64  `json:"bannedAt,omitempty"`
 }
 
 type persistedState struct {
@@ -73,7 +76,7 @@ func (h *Hub) loadDevices() error {
 		a.metadataCharged = true
 		for _, pd := range devs {
 			_, charge, _ := prepareDeviceMetadata(pd.Device) // validated before allocating live maps
-			dev := &device{info: pd.Device, lastSeen: pd.LastSeen, banned: pd.Banned, banReason: pd.BanReason, bannedAt: pd.BannedAt}
+			dev := &device{info: pd.Device, lastSeen: pd.LastSeen, banned: pd.Banned, banReason: pd.BanReason, bannedAt: pd.BannedAt, phoneHash: pd.PhoneHash, bindingID: pd.BindingID, pairAttemptID: pd.PairAttemptID}
 			dev.metadataBytes = charge
 			if pd.SecretHash != "" {
 				decoded, _ := hex.DecodeString(pd.SecretHash) // record validation already checked size/encoding
@@ -152,7 +155,7 @@ func (h *Hub) snapshot() persistedState {
 			if d.conn != nil {
 				ls = nowMs()
 			}
-			entry := persistedDevice{Device: d.info, LastSeen: ls, Banned: d.banned, BanReason: d.banReason, BannedAt: d.bannedAt}
+			entry := persistedDevice{Device: d.info, LastSeen: ls, Banned: d.banned, BanReason: d.banReason, BannedAt: d.bannedAt, PhoneHash: d.phoneHash, BindingID: d.bindingID, PairAttemptID: d.pairAttemptID}
 			if d.hasSecret {
 				entry.SecretHash = hex.EncodeToString(d.secretHash[:])
 			}

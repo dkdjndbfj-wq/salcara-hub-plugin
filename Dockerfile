@@ -3,7 +3,7 @@
 FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS build
 ARG TARGETOS
 ARG TARGETARCH
-ARG VERSION=0.5.0-dev
+ARG VERSION=0.5.1-dev
 WORKDIR /src
 COPY go.mod ./go.mod
 COPY internal/hub ./internal/hub
@@ -23,7 +23,7 @@ COPY --from=build /out/salcara-hub /salcara-hub
 COPY --from=build /out/salcara-hub-launcher /salcara-hub-launcher
 
 FROM scratch AS runtime
-ARG VERSION=0.5.0-dev
+ARG VERSION=0.5.1-dev
 LABEL org.opencontainers.image.title="Salcara Hub standalone" \
       org.opencontainers.image.description="Independent device pairing and remote message relay; no model API key required" \
       org.opencontainers.image.source="https://github.com/dkdjndbfj-wq/salcara-hub-plugin" \

@@ -113,7 +113,7 @@ func decodeStoredRecord(raw []byte, target any) error {
 	var fields map[string]bool
 	switch target.(type) {
 	case *persistedDevice:
-		fields = map[string]bool{"device": true, "lastSeen": true, "secretHash": true, "pairHash": true, "banned": true, "banReason": true, "bannedAt": true}
+		fields = map[string]bool{"device": true, "lastSeen": true, "secretHash": true, "pairHash": true, "phoneHash": true, "bindingId": true, "pairAttemptId": true, "banned": true, "banReason": true, "bannedAt": true}
 	case *AdminAudit:
 		fields = map[string]bool{"at": true, "action": true, "device_ref": true, "reason": true, "actor": true}
 	}
@@ -150,7 +150,7 @@ func decodeStoredRecord(raw []byte, target any) error {
 					return errors.New("unknown persisted device JSON field")
 				}
 				keys[name] = true
-				childString = depth == 0 && (name == "secretHash" || name == "pairHash")
+				childString = depth == 0 && (name == "secretHash" || name == "pairHash" || name == "phoneHash" || name == "bindingId" || name == "pairAttemptId")
 				if depth == 0 && name == "device" {
 					childFields = map[string]bool{"deviceId": true, "name": true, "os": true, "version": true, "tools": true, "projects": true}
 				}
@@ -247,7 +247,7 @@ func decodeDevicesState(raw []byte, limit int64) (persistedState, int64, error) 
 						err = errors.New("invalid or duplicate persisted device metadata")
 						break
 					}
-					if pd.SecretHash != "" && !hexHash(pd.SecretHash) || pd.PairHash != "" && !hexHash(pd.PairHash) {
+					if pd.SecretHash != "" && !hexHash(pd.SecretHash) || pd.PairHash != "" && !hexHash(pd.PairHash) || pd.PhoneHash != "" && !validPairHash(pd.PhoneHash) || pd.BindingID != "" && !validPairHash(pd.BindingID) || pd.PairAttemptID != "" && !validPairHash(pd.PairAttemptID) || pd.PairHash != "" && pd.BindingID != "" && pd.PhoneHash == "" {
 						err = errors.New("invalid persisted device credential hash")
 						break
 					}

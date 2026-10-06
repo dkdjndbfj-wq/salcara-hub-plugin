@@ -14,10 +14,14 @@ import (
 const pairTTL = 5 * time.Minute
 
 type pairAttempt struct {
-	codeHash [32]byte
-	qrHash   [32]byte
-	expires  time.Time
-	attempts int
+	attemptID  string
+	computerID string
+	bindingID  string
+	phoneHash  string // restrict new station QR to the computer's already authorized phone
+	codeHash   [32]byte
+	qrHash     [32]byte
+	expires    time.Time
+	attempts   int
 }
 
 type pairIdentity struct{ accountID, deviceID string }
@@ -34,9 +38,56 @@ func (h *Hub) setPairLocked(accountID string, dev *device, hash [32]byte, paired
 		delete(h.pairTokens, dev.pairHash)
 	}
 	dev.pairHash, dev.hasPair = hash, paired
+	dev.pairRevision++
 	if paired {
 		h.pairTokens[hash] = pairIdentity{accountID, dev.info.DeviceID}
 	}
+	// Pair transitions are not conversation events, but they change whether an
+	// existing phone long-poll is authorized. Wake that waiter so it rechecks
+	// the token immediately instead of waiting for its timeout.
+	if account := h.accounts[accountID]; account != nil {
+		account.wakeEventWaitersLocked()
+	}
+	notifyPairLocked(dev)
+}
+
+func notifyPairLocked(dev *device) {
+	if dev.conn == nil || dev.conn.pairChanged == nil {
+		return
+	}
+	select {
+	case dev.conn.pairChanged <- struct{}{}:
+	default:
+	}
+}
+
+// Public device state only. No phone token, secret or QR ticket is returned.
+func (h *Hub) pairStateLocked(accountID string, dev *device) map[string]any {
+	expires := int64(0)
+	if attempt := h.pairCodes[pairKey(accountID, dev.info.DeviceID)]; attempt != nil && time.Now().Before(attempt.expires) {
+		expires = attempt.expires.UnixMilli()
+	}
+	return map[string]any{"deviceId": dev.info.DeviceID, "paired": dev.hasPair, "revision": dev.pairRevision, "pendingExpiresAt": expires, "bindingId": dev.bindingID, "phoneHash": dev.phoneHash, "attemptId": dev.pairAttemptID}
+}
+
+func (h *Hub) handlePairStatus(w http.ResponseWriter, r *http.Request, accountID string) {
+	id := r.Header.Get("X-Salcara-Device-Id")
+	if id == "" {
+		id = r.URL.Query().Get("deviceId")
+	}
+	h.mu.Lock()
+	var dev *device
+	if a := h.accounts[accountID]; a != nil {
+		dev = a.devices[id]
+	}
+	if dev == nil || dev.banned || !matchesDeviceSecret(dev, r) {
+		h.mu.Unlock()
+		writeError(w, 403, "电脑身份验证失败")
+		return
+	}
+	state := h.pairStateLocked(accountID, dev)
+	h.mu.Unlock()
+	writeJSON(w, 200, state)
 }
 
 func pairTokenHash(r *http.Request) ([32]byte, bool) {
@@ -121,13 +172,29 @@ func (h *Hub) pairedDevice(w http.ResponseWriter, r *http.Request, accountID str
 
 func (h *Hub) handlePairStart(w http.ResponseWriter, r *http.Request, accountID string) {
 	var input struct {
-		DeviceID string `json:"deviceId"`
+		DeviceID   string `json:"deviceId"`
+		BindingID  string `json:"bindingId"`
+		PhoneHash  string `json:"phoneHash"`
+		ComputerID string `json:"computerId"`
+		AttemptID  string `json:"attemptId"`
 	}
 	if !decodeBody(w, r, maxDefaultBody, &input) {
 		return
 	}
 	if !validID(input.DeviceID) {
 		writeError(w, http.StatusBadRequest, "deviceId 无效")
+		return
+	}
+	if input.BindingID != "" && (!validPairHash(input.BindingID) || input.PhoneHash != "" && !validPairHash(input.PhoneHash) || !validID(input.ComputerID)) {
+		writeError(w, 400, "电脑配对身份无效")
+		return
+	}
+	if input.BindingID == "" && input.PhoneHash != "" {
+		writeError(w, 400, "电脑配对身份无效")
+		return
+	}
+	if input.AttemptID != "" && !validPairHash(input.AttemptID) {
+		writeError(w, 400, "配对请求无效")
 		return
 	}
 	code, ok := randomPairCode()
@@ -156,13 +223,35 @@ func (h *Hub) handlePairStart(w http.ResponseWriter, r *http.Request, accountID 
 		writeError(w, http.StatusConflict, "电脑尚未连接")
 		return
 	}
+	if dev.bindingID != "" && input.BindingID == "" {
+		h.mu.Unlock()
+		writeError(w, http.StatusConflict, "本站已有新版手机绑定，请更新电脑端后再生成二维码")
+		return
+	}
+	if dev.hasPair && dev.bindingID != "" {
+		// While an active pair exists, a QR can only be regenerated for that
+		// same phone. An unpaired device is allowed to carry a fresh binding ID
+		// with an empty hash so a post-revoke rebind can complete normally.
+		if input.BindingID == "" || input.PhoneHash == "" || input.BindingID != dev.bindingID || input.PhoneHash != dev.phoneHash {
+			h.mu.Unlock()
+			writeError(w, http.StatusConflict, "这台电脑已绑定另一台手机，请先在电脑解除绑定")
+			return
+		}
+	}
 	expires := time.Now().Add(pairTTL)
 	key := pairKey(accountID, input.DeviceID)
 	h.deletePairAttemptLocked(key)
-	attempt := &pairAttempt{codeHash: sha256.Sum256([]byte(code)), qrHash: sha256.Sum256([]byte(ticket)), expires: expires}
+	attempt := &pairAttempt{codeHash: sha256.Sum256([]byte(code)), qrHash: sha256.Sum256([]byte(ticket)), expires: expires, bindingID: input.BindingID, phoneHash: input.PhoneHash, computerID: input.ComputerID, attemptID: input.AttemptID}
 	h.pairCodes[key], h.pairTickets[attempt.qrHash] = attempt, key
+	// A new QR is a state transition too. Incrementing before notifying the
+	// bridge prevents a delayed pre-start (or revoked) snapshot from clearing
+	// the freshly-created pending attempt on the desktop.
+	dev.pairRevision++
+	dev.pairAttemptID = input.AttemptID
+	revision := dev.pairRevision
+	notifyPairLocked(dev)
 	h.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"code": code, "ticket": ticket, "expires_at": expires.UnixMilli()})
+	writeJSON(w, http.StatusOK, map[string]any{"code": code, "ticket": ticket, "expires_at": expires.UnixMilli(), "revision": revision, "attemptId": input.AttemptID})
 }
 
 func (h *Hub) handlePairConfirm(w http.ResponseWriter, r *http.Request, accountID string) {
@@ -195,6 +284,11 @@ func (h *Hub) handlePairConfirm(w http.ResponseWriter, r *http.Request, accountI
 		}
 		attempt.attempts++
 		if subtle.ConstantTimeCompare(hash[:], attempt.codeHash[:]) == 1 {
+			// Modern QRs require a phone installation identity. Legacy code entry
+			// must never bypass the one-phone restriction.
+			if attempt.bindingID != "" {
+				continue
+			}
 			deviceID := strings.TrimPrefix(key, accountID+"\x00")
 			if a := h.accounts[accountID]; a != nil {
 				matched = a.devices[deviceID]
@@ -203,7 +297,7 @@ func (h *Hub) handlePairConfirm(w http.ResponseWriter, r *http.Request, accountI
 			break
 		}
 	}
-	if matched == nil || matched.conn == nil {
+	if matched == nil || matched.conn == nil || matched.banned {
 		h.mu.Unlock()
 		writeError(w, http.StatusForbidden, "配对码无效或已过期")
 		return
@@ -223,7 +317,9 @@ func (h *Hub) handlePairConfirm(w http.ResponseWriter, r *http.Request, accountI
 
 func (h *Hub) handlePairRevoke(w http.ResponseWriter, r *http.Request, accountID string) {
 	var input struct {
-		DeviceID string `json:"deviceId"`
+		DeviceID  string `json:"deviceId"`
+		BindingID string `json:"bindingId"`
+		PhoneHash string `json:"phoneHash"`
 	}
 	if !decodeBody(w, r, maxDefaultBody, &input) {
 		return
@@ -239,6 +335,11 @@ func (h *Hub) handlePairRevoke(w http.ResponseWriter, r *http.Request, accountID
 		writeError(w, http.StatusForbidden, "电脑身份验证失败")
 		return
 	}
+	if input.BindingID != "" && (input.BindingID != dev.bindingID || input.PhoneHash != dev.phoneHash) {
+		h.mu.Unlock()
+		writeError(w, 409, "配对状态已更换")
+		return
+	}
 	h.revokePairLocked(accountID, dev)
 	h.mu.Unlock()
 	h.markDirty()
@@ -247,6 +348,7 @@ func (h *Hub) handlePairRevoke(w http.ResponseWriter, r *http.Request, accountID
 
 func (h *Hub) revokePairLocked(accountID string, dev *device) {
 	h.setPairLocked(accountID, dev, [32]byte{}, false)
+	dev.pairAttemptID = ""
 	h.forgetPush(accountID, dev.info.DeviceID)
 	h.deletePairAttemptLocked(pairKey(accountID, dev.info.DeviceID))
 	for sub := range h.accounts[accountID].apps {
