@@ -11,7 +11,7 @@
 
 ## 首次部署
 
-取得正式 `standalone-v0.5.0` 源码并审阅 `deploy/standalone/install.sh`，在目标 Linux 主机运行：
+取得正式 `standalone-v0.5.1` 源码并审阅 `deploy/standalone/install.sh`，在目标 Linux 主机运行：
 
 ```sh
 bash deploy/standalone/install.sh \
@@ -19,7 +19,7 @@ bash deploy/standalone/install.sh \
   --install-dir /opt/salcara-hub
 ```
 
-必须把占位域名换成用户指定并控制的实际域名。只使用固定正式 0.5.0 镜像；Release 或镜像不可达就停止，不能输出“已经部署完成”。脚本不修改 Nginx、不安装/重启 Docker、不控制远程 Docker，也不会将初始管理密钥打印出来。
+必须把占位域名换成用户指定并控制的实际域名。只使用固定正式 0.5.1 镜像；Release 或镜像不可达就停止，不能输出“已经部署完成”。脚本不修改 Nginx、不安装/重启 Docker、不控制远程 Docker，也不会将初始管理密钥打印出来。
 
 脚本健康检查成功后，仍要完成反代步骤：
 
@@ -32,7 +32,7 @@ bash deploy/standalone/install.sh \
 
 ## 必须验收并记录
 
-- 运行的是正式镜像，Hub 版本 0.5.0，非 root、只读、仅回环发布端口，无 Docker socket。
+- 运行的是正式镜像，Hub 版本 0.5.1，非 root、只读、仅回环发布端口，无 Docker socket。
 - 本地 health 正常、公网说明和管理页可达，query 303 清除，同源 iframe 安全头正确；未登录管理 API 返回 401。
 - 原 Sub2API 页面和只读健康未受影响；不发送付费模型请求当健康检查。
 - 管理页管理密钥登录/更换管理密钥由用户自行输入秘密验收；不要将管理密钥读取到工具输出或要求用户发管理密钥。未做这一步就列为待用户验收。

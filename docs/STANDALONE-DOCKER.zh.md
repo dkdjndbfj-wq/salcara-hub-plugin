@@ -1,4 +1,4 @@
-# 独立 Docker 部署（0.5.0：管理密钥登录）
+# 独立 Docker 部署（0.5.1：管理密钥登录）
 
 Hub 独立运行，不修改 Sub2API、不共用它的数据库，也不读取模型 API Key。普通用户电脑与手机扫码配对即可使用，不需要管理员审批；管理员可在后台封禁设备。Docker 只负责消息转发，不能替电脑端绕过 Codex / Claude Desktop 的宿主能力限制。
 
@@ -14,16 +14,17 @@ Hub 独立运行，不修改 Sub2API、不共用它的数据库，也不读取�
 | --- | --- |
 | 没有运行过独立 Hub | 下面的首次安装 |
 | 已有 0.4.0 Hub / 数据卷 | [旧版迁移](#旧版迁移)，不能重新首次安装 |
+| 已有 0.5.0 管理密钥版 | [0.5.x 修复更新](#05x-修复更新)，不再初始化 |
 | 交给 Agent 部署 | [Agent 部署指南](AGENT-DEPLOY.zh.md) |
 
-0.5.0 的正式 Release 和镜像发布后才能安装；仓库已有代码不代表镜像已发布。以 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 中的 `standalone-v0.5.0` 为准，不使用未知 `latest` 或未签名开发产物。
+只安装已经公开的正式 Release 和镜像；仓库已有代码不代表镜像已发布。以 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 中的 `standalone-v0.5.1` 为准，不使用未知 `latest` 或未签名开发产物。
 
 ## 2. 首次安装
 
 将示例域名换成自己的域名。以下是本地审阅脚本后执行，不是远程 `curl | sh`。
 
 ```sh
-git clone --branch standalone-v0.5.0 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
+git clone --branch standalone-v0.5.1 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
 cd salcara-hub
 less deploy/standalone/install.sh
 bash deploy/standalone/install.sh \
@@ -33,7 +34,7 @@ bash deploy/standalone/install.sh \
 
 也可以直接 `bash deploy/standalone/install.sh`，按提示填写 URL 和新安装目录。当前用户必须能访问本机 Docker、写入安装目录的父目录；权限不足时自行选择合适目录或经过授权提权。脚本拒绝已有目录、Hub 容器/数据卷、远程 Docker context 和冲突端口，不覆盖配置、不删除卷、不重复初始化。
 
-脚本只拉固定正式镜像 `ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.0`，验证配置，初始化管理密钥，启动并检查本地 0.5.0 健康。初始管理密钥不会打印、写日志或放进命令参数，只保存到受限文件。失败会退出并保留现场，不显示假完成提示，不自动清理或重试 `-init`。不要同时运行多个安装脚本。
+脚本只拉固定正式镜像 `ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.1`，验证配置，初始化管理密钥，启动并检查本地 0.5.1 健康。初始管理密钥不会打印、写日志或放进命令参数，只保存到受限文件。失败会退出并保留现场，不显示假完成提示，不自动清理或重试 `-init`。不要同时运行多个安装脚本。
 
 安装结束会给出管理 URL、两种 iframe URL、初始管理密钥文件位置和待配置的反代片段。**容器就绪还不代表公网可用，下一步反代配置不能省略。**
 
@@ -43,7 +44,7 @@ bash deploy/standalone/install.sh \
 
 ```dotenv
 SALCARA_HUB_PUBLIC_URL=https://relay.example.com/salcara-hub
-SALCARA_HUB_IMAGE_VERSION=0.5.0
+SALCARA_HUB_IMAGE_VERSION=0.5.1
 SALCARA_HUB_DISABLE_UPDATES=false
 ```
 
@@ -116,13 +117,27 @@ curl --fail https://relay.example.com/salcara-hub/
 docker stats --no-stream
 ```
 
-检查本地健康中的产品为 `salcara-hub-standalone`、版本为 `0.5.0`；确认公网管理页能登录、更换管理密钥、退出，未登录管理 API 返回 401，普通说明页正常，同源 iframe 可打开，原 Sub2API 页面和只读健康接口不变。不要发送付费模型请求当作部署健康检查，不把管理密钥打印在测试报告中。
+检查本地健康中的产品为 `salcara-hub-standalone`、版本为 `0.5.1`；确认公网管理页能登录、更换管理密钥、退出，未登录管理 API 返回 401，普通说明页正常，同源 iframe 可打开，原 Sub2API 页面和只读健康接口不变。不要发送付费模型请求当作部署健康检查，不把管理密钥打印在测试报告中。
 
 若是 Agent 部署，只提供成功核实的项目、容器、镜像/版本、反代变更与 URL；没有实测手机扫码/桌面续聊就明确“待设备端验收”。服务器自检通过不能保证电脑端所有宿主能力已可用。
 
+## 0.5.x 修复更新
+
+0.5.0 已使用管理密钥的部署无需认证迁移。先备份原项目配置和完整持久卷，在管理页检查更新可升级 Hub 子程序；要升级完整镜像，则在原项目的 `.env` 中将 `SALCARA_HUB_IMAGE_VERSION` 改成 `0.5.1`，保留原项目名、卷名、网络及 URL，然后逐条运行：
+
+```sh
+docker compose -f compose.release.yml config --quiet
+docker compose -f compose.release.yml pull hub
+docker compose -f compose.release.yml up -d --no-deps hub
+docker compose -f compose.release.yml ps
+curl --fail http://127.0.0.1:8787/healthz
+```
+
+任一步失败就停止检查。不要运行首次安装脚本、`-init` 或 `down -v`；更新会短暂断开远程并使后台登录会话失效，管理密钥和设备绑定保留。
+
 ## 旧版迁移
 
-认证变更必须通过 **0.5.0 完整镜像升级**。不要在 0.4.0 管理页点击应用更新来迁移，不要为升级创建另一套项目或空卷，也不要重跑首次安装脚本。
+0.4.0 的认证变更必须通过 **0.5.x 完整镜像升级**（当前为 0.5.1）。不要在 0.4.0 管理页点击应用更新来迁移，不要为升级创建另一套项目或空卷，也不要重跑首次安装脚本。
 
 1. 找到原 Hub 的准确 Compose 项目目录、文件、项目名及数据卷。若曾使用 `-p` 自定义项目名，下面所有命令沿用原项目名；不要按示例名称猜测。
 2. 记录旧容器镜像 ID/digest、运行 Hub 版本，确认目标 Release/镜像正式可用。备份原 Compose、`.env` 和反代配置。停止的只能是这个 Hub，不停止 Sub2API、数据库、Redis 或 Docker daemon。
@@ -142,7 +157,7 @@ chmod -R go-rwx ../hub-backup-before-0.5.0
 
 备份失败时停止升级，在原配置未改变的前提下 `docker compose -f compose.release.yml start hub` 恢复旧 Hub。不要删卷或猜测性继续。
 
-4. 用自己的编辑器将正式 Compose 更新成 0.5.0 的配置，保留原项目名、卷名和网络，`.env` 中设 `SALCARA_HUB_IMAGE_VERSION=0.5.0`。新的配置不再使用 `SALCARA_HUB_ADMIN_TOKEN_FILE`。下面在**已完成完整备份且旧 Hub 已停止**后运行：
+4. 用自己的编辑器将正式 Compose 更新成 0.5.1 的配置，保留原项目名、卷名和网络，`.env` 中设 `SALCARA_HUB_IMAGE_VERSION=0.5.1`。新的配置不再使用 `SALCARA_HUB_ADMIN_TOKEN_FILE`。下面在**已完成完整备份且旧 Hub 已停止**后运行：
 
 ```sh
 docker compose -f compose.release.yml config --quiet
@@ -163,7 +178,7 @@ curl --fail http://127.0.0.1:8787/healthz
 
 仍能登录时，直接使用管理页的“更换管理密钥”，不需要另外部署后台。完全遗失时，只有能操作服务器 Docker 的部署者才能恢复，不提供公网免登录重置接口。
 
-先按上面的备份流程确认准确项目、停止**仅 Hub**并备份完整数据。使用已经升级到 0.5.0 的正式镜像，在原项目目录逐条运行；任何一步失败立即停下检查：
+先按上面的备份流程确认准确项目、停止**仅 Hub**并备份完整数据。使用已经升级到 0.5.x 的正式镜像，在原项目目录逐条运行；任何一步失败立即停下检查：
 
 ```sh
 docker compose -f compose.release.yml stop hub

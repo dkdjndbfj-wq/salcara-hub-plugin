@@ -1,12 +1,12 @@
 # Salcara Hub：发布与更新维护
 
-产品标识 `salcara-hub-standalone`，镜像 `ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.0`，Git 标签 `standalone-v0.5.0`，新认证版本更新清单 `updates/standalone-account.json`。发布时保留上述兼容标识和公开下载地址，不覆盖任何既有签名更新清单。
+产品标识 `salcara-hub-standalone`，当前镜像 `ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.1`，Git 标签 `standalone-v0.5.1`，新认证版本更新清单 `updates/standalone-account.json`。发布时保留兼容标识和已发布版本的公开下载地址；新版本替换当前更新指针，但不重签或覆盖旧版本资产、旧协议更新源。
 
 0.5.0 首次部署自动生成每站独立的管理密钥，没有账号。0.4.0 的管理令牌不再用于管理页登录。旧安装不能直接通过网页跨过认证迁移：先按 [部署指南](STANDALONE-DOCKER.zh.md) 停机备份、生成新认证文件，再切换镜像；配对及设备数据保留。旧更新源停留在 0.4.0，新安装只使用新更新源。
 
 ## 首次及以后发布
 
-1. 完成源码审查，在准备发布的固定 commit 运行 `Standalone release build`，输入裸版本号，例如 `0.5.0`；默认 `publish_image=false` 只构建验证，不部署服务器。CI 对 amd64 跑实际非 root / 只读容器测试，并交叉构建 arm64；arm64 不属于实机验收。
+1. 完成源码审查，在准备发布的固定 commit 运行 `Standalone release build`，输入裸版本号，例如 `0.5.1`；默认 `publish_image=false` 只构建验证，不部署服务器。CI 对 amd64 跑实际非 root / 只读容器测试，并交叉构建 arm64；arm64 不属于实机验收。
 2. 验证 CI 成功以及提交 SHA 后，下载对应 `standalone-release-版本号` artifact。它包含两架构 Hub / launcher、`SHA256SUMS` 和未签名的 `standalone-payload.json`。检查实际二进制大小 / 哈希与 payload 一致。不能把未签名 payload 放进更新源。
 3. 在同一源码 commit 用仓库外、既有 `salcara-local-20260930` Ed25519 私钥签名；不换发布者身份，不把私钥上传 GitHub 或服务器。下面示例只表示路径，不能把私钥内容写进命令或日志：
 
@@ -29,7 +29,7 @@ go run ./tools/standalone-feed \
 
 ```sh
 node deploy/standalone/verify-release.mjs \
-  /安全的新目录 0.5.0 /安全的新目录/standalone-account.json publisher/public.json
+  /安全的新目录 0.5.1 /安全的新目录/standalone-account.json publisher/public.json
 ```
 
 它必须显示固定发布者、签名、产品、版本及两份实际 Hub 文件一致。发布后下载实际 HTTPS assets 到新的空目录，再用同一命令复验，不能只检查上传动作成功。
