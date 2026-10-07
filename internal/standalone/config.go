@@ -24,7 +24,7 @@ const Prefix = "/salcara-hub"
 
 // Version is set by the standalone release build via -ldflags -X. The
 // launcher verifies this exact value in /healthz before completing an update.
-var Version = "0.5.1-dev"
+var Version = "0.5.2-dev"
 
 const Product = "salcara-hub-standalone"
 

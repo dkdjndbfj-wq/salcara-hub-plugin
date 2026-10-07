@@ -11,7 +11,7 @@
 - [构建、签名与更新维护](STANDALONE-RELEASE.zh.md)。
 - [2026-10-06 远程链路维护复核](MAINTENANCE-20261006.md)。
 - [0.5.0 发布与镜像交接复核](RELEASE-0.5.0-CLAUDE-REVIEW.md)。
-- [0.5.1 更新说明](RELEASE-0.5.1.md)。
+- [0.5.2 更新说明](RELEASE-0.5.2.md)。
 - [0.5.1 发布验收](RELEASE-0.5.1-VERIFICATION.md)。
 - [CI 开发产物说明](../deploy/standalone/CI-ARTIFACT.md)：不是签名更新包。
 - [项目许可证](../LICENSE) 与 [第三方声明](../THIRD_PARTY_NOTICES.md)。

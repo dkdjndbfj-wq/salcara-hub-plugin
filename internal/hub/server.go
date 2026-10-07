@@ -114,6 +114,7 @@ func New(cfg Config) (*Hub, error) {
 		"/me":                 {http.MethodGet, true, h.handleMe},
 		"/bridge/register":    {http.MethodPost, true, h.handleRegister},
 		"/bridge/stream":      {http.MethodGet, true, h.handleBridgeStream},
+		"/bridge/standby":     {http.MethodGet, true, h.handleBridgeStandby},
 		"/bridge/pair/status": {http.MethodGet, true, h.handlePairStatus},
 		"/bridge/events":      {http.MethodPost, true, h.handleBridgeEvents},
 		"/bridge/reply":       {http.MethodPost, true, h.handleBridgeReply},
@@ -179,6 +180,14 @@ func (h *Hub) janitor() {
 			h.limiter.sweep(now)
 			h.enrollLimiter.sweep(now)
 			h.mu.Lock()
+			for _, account := range h.accounts {
+				for _, dev := range account.devices {
+					if dev.standby != nil && now.UnixMilli()-dev.standbyAt > standbyTTL.Milliseconds() {
+						dev.standby.close()
+						dev.standby = nil
+					}
+				}
+			}
 			for id, attempt := range h.pairCodes {
 				if now.After(attempt.expires) {
 					h.deletePairAttemptLocked(id)

@@ -233,6 +233,7 @@ func (h *Hub) commandCapabilities() ([]string, int64) {
 	capabilities := []string{"events.cursor.v1", "events.wait.v1"}
 	if h.receipts != nil && h.receipts.dir != "" {
 		capabilities = append(capabilities, "commands.idempotency.v1")
+		capabilities = append(capabilities, "station.standby.v1")
 	}
 	return capabilities, int64(commandReceiptTTL / time.Second)
 }
@@ -273,7 +274,11 @@ func (h *Hub) executeReceipt(ctx context.Context, accountID, deviceID, credentia
 	if entry == nil {
 		h.mu.Lock()
 		a := h.accounts[accountID]
-		online := a != nil && a.devices[deviceID] != nil && a.devices[deviceID].conn != nil
+		online := false
+		if a != nil && a.devices[deviceID] != nil {
+			dev := a.devices[deviceID]
+			online = dev.conn != nil || authorize != nil && h.standbyCommandLocked(dev, command) != nil
+		}
 		h.mu.Unlock()
 		if !online {
 			s.mu.Unlock()

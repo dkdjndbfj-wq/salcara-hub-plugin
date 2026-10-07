@@ -146,23 +146,26 @@ type bridgeConn struct {
 func (c *bridgeConn) close() { c.once.Do(func() { close(c.closed) }) }
 
 type device struct {
-	metadataBytes int64 // conservative retained/decoded metadata charge, guarded by Hub.mu
-	info          Device
-	lastSeen      int64
-	conn          *bridgeConn // nil while offline
-	secretHash    [32]byte
-	hasSecret     bool
-	pairHash      [32]byte
-	hasPair       bool
-	pairRevision  int64
-	phoneHash     string
-	bindingID     string
-	pairAttemptID string
-	lastAppSeen   int64 // last request from the paired phone (memory only); push waits while it is active
-	banned        bool
-	banReason     string
-	bannedAt      int64
-	latency       latencyState
+	metadataBytes     int64 // conservative retained/decoded metadata charge, guarded by Hub.mu
+	info              Device
+	lastSeen          int64
+	conn              *bridgeConn // nil while offline
+	standby           *bridgeConn // handover only; never reports this station online
+	standbyAt         int64
+	standbyComputerID string
+	secretHash        [32]byte
+	hasSecret         bool
+	pairHash          [32]byte
+	hasPair           bool
+	pairRevision      int64
+	phoneHash         string
+	bindingID         string
+	pairAttemptID     string
+	lastAppSeen       int64 // last request from the paired phone (memory only); push waits while it is active
+	banned            bool
+	banReason         string
+	bannedAt          int64
+	latency           latencyState
 }
 
 func (d *device) status() DeviceStatus {

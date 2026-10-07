@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly version=0.5.1
+readonly version=0.5.2
 readonly version_pattern=${version//./\\.}
 readonly project=salcara-hub-standalone
 readonly image="ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:$version"
@@ -16,7 +16,7 @@ finished=false
 
 usage() {
     printf '%s\n' \
-        '首次部署 Salcara Hub 0.5.1（Linux；需要已有 Docker、Compose、HTTPS 反代）。' \
+        '首次部署 Salcara Hub 0.5.2（Linux；需要已有 Docker、Compose、HTTPS 反代）。' \
         '用法：bash deploy/standalone/install.sh [--public-url URL --install-dir ABSOLUTE_PATH]' \
         '示例：bash deploy/standalone/install.sh --public-url https://relay.example.com/salcara-hub --install-dir /opt/salcara-hub' \
         '无参数时交互填写。已有部署请按 docs/STANDALONE-DOCKER.zh.md 迁移，不要重复运行。'
@@ -153,7 +153,7 @@ for attempt in {1..15}; do
     fi
     sleep 1
 done
-[[ "$healthy" == true ]] || die '未确认 0.5.1 本地健康；不输出部署完成提示。'
+[[ "$healthy" == true ]] || die '未确认 0.5.2 本地健康；不输出部署完成提示。'
 
 mkdir -m 700 -- "$install_dir/secrets"
 compose cp hub:/data/admin-initial-login.txt "$install_dir/secrets/admin-initial-login.txt" >/dev/null || die '无法安全导出初始管理密钥。'

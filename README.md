@@ -26,7 +26,7 @@ Hub 不运行大模型，也不要求用户提交中转站账号或模型 API Ke
 使用正式版本源码，在本地审阅脚本后执行：
 
 ```sh
-git clone --branch standalone-v0.5.1 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
+git clone --branch standalone-v0.5.2 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
 cd salcara-hub
 bash deploy/standalone/install.sh \
   --public-url https://relay.example.com/salcara-hub \

@@ -326,6 +326,11 @@ func (h *Hub) executeCommand(ctx context.Context, accountID, deviceID string, co
 		return replyBody{Error: "这台电脑尚未配对或已被封禁"}, 403
 	}
 	conn := dev.conn
+	standby := false
+	if conn == nil && authorize != nil {
+		conn = h.standbyCommandLocked(dev, command)
+		standby = conn != nil
+	}
 	if conn == nil {
 		h.mu.Unlock()
 		return replyBody{Error: "电脑不在线"}, 409
@@ -383,7 +388,7 @@ func (h *Hub) executeCommand(ctx context.Context, accountID, deviceID string, co
 			h.mu.Unlock()
 			return replyBody{Error: "设备授权已失效"}, 403
 		}
-		if dev.conn != conn {
+		if !standby && dev.conn != conn || standby && dev.standby != conn {
 			h.mu.Unlock()
 			return replyBody{Error: "电脑连接已断开或更换"}, 409
 		}

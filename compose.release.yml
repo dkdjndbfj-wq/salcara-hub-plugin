@@ -2,7 +2,7 @@
 name: salcara-hub-standalone
 services:
   hub:
-    image: ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:${SALCARA_HUB_IMAGE_VERSION:-0.5.1}
+    image: ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:${SALCARA_HUB_IMAGE_VERSION:-0.5.2}
     user: "65532:65532"
     restart: unless-stopped
     stop_grace_period: 30s
