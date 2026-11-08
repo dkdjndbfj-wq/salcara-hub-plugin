@@ -5,7 +5,7 @@ on:
       version:
         description: Bare stable version, matching the standalone release tag
         required: true
-        default: '0.5.2'
+        default: '0.5.3'
       publish_image:
         description: Publish the tested image to GHCR (does not deploy a server)
         type: boolean
@@ -13,7 +13,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: standalone-release-${{ github.ref }}
+  # Same canonical version is serialized across branches/tags in this repository.
+  group: standalone-release-${{ github.repository }}-${{ inputs.version }}
   cancel-in-progress: false
 jobs:
   build:
@@ -21,6 +22,9 @@ jobs:
     timeout-minutes: 45
     outputs:
       version: ${{ steps.version.outputs.value }}
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+      image_digest: ${{ steps.image.outputs.digest }}
+      archive_digest: ${{ steps.seal.outputs.archive_digest }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,6 +40,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install OCI copy tool (no registry login in the build job)
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          skopeo --version
+      - name: Create isolated release directories
+        id: paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d "$RUNNER_TEMP/salcara-release.XXXXXXXX")"
+          layout="$(mktemp -d "$RUNNER_TEMP/salcara-oci.XXXXXXXX")"
+          printf 'root=%s\nlayout=%s\n' "$root" "$layout" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -47,31 +64,54 @@ jobs:
           cp -a tools/standalone-feed /tmp/standalone-signer/tools/
           cd /tmp/standalone-signer
           GOTOOLCHAIN=local GOPROXY=off go test ./tools/standalone-feed
-      - name: Validate deployment and management key login UI
+      - name: Validate deployment, public and administrator UI, and release tooling
         env:
           SALCARA_HUB_PUBLIC_URL: https://relay.example.com/salcara-hub
         run: |
           docker compose -f compose.release.yml config --quiet
-          bash -n deploy/standalone/install.sh deploy/standalone/install.test.sh
+          bash -n deploy/standalone/install.sh deploy/standalone/create-bot-binding.sh deploy/standalone/resume-bot.sh deploy/standalone/install.test.sh deploy/standalone/bot-deploy.test.sh
           bash deploy/standalone/install.test.sh
-          node --test deploy/standalone/admin-ui.test.mjs deploy/standalone/release.test.mjs
-      - name: Build amd64 with Go tests, vet and race checks
+          bash deploy/standalone/bot-deploy.test.sh
+          node --test deploy/standalone/*.test.mjs
+      - name: Build one immutable multiarch OCI archive with provenance and SBOM
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:${{ steps.version.outputs.value }}
+          build-args: VERSION=${{ steps.version.outputs.value }}
+          outputs: type=oci,dest=${{ steps.paths.outputs.root }}/image.tar
+          provenance: true
+          sbom: true
+      - name: Verify all OCI blobs, both architectures and their attestations
+        id: seal
         env:
           VERSION: ${{ steps.version.outputs.value }}
-        run: docker buildx build --platform linux/amd64 --build-arg VERSION="$VERSION" --load --tag salcara-hub-standalone:ci .
-      - name: Run isolated non-root container smoke test
-        run: node deploy/standalone/container-smoke.mjs salcara-hub-standalone:ci
-      - name: Export both architectures from the exact tested source
-        env:
-          VERSION: ${{ steps.version.outputs.value }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          RELEASE_ROOT: ${{ steps.paths.outputs.root }}
+          OCI_LAYOUT: ${{ steps.paths.outputs.layout }}
         run: |
-          docker buildx build --target binary-export --platform linux/amd64 --build-arg VERSION="$VERSION" --output type=local,dest=/tmp/standalone-release/linux-amd64 .
-          docker buildx build --target binary-export --platform linux/arm64 --build-arg VERSION="$VERSION" --output type=local,dest=/tmp/standalone-release/linux-arm64 .
-          node deploy/standalone/release-stage.mjs /tmp/standalone-release "$VERSION"
+          skopeo copy --all --preserve-digests "oci-archive:$RELEASE_ROOT/image.tar" "oci:$OCI_LAYOUT:release"
+          node deploy/standalone/release-image.mjs seal "$OCI_LAYOUT" "$RELEASE_ROOT/image.tar" "$RELEASE_ROOT/image-receipt.json" "$VERSION" "$GITHUB_SHA" "$IMAGE_DIGEST"
+          node deploy/standalone/release-image.mjs export "$RELEASE_ROOT/image.tar" "$RELEASE_ROOT/image-receipt.json" "$RELEASE_ROOT"
+      - name: Run isolated non-root container smoke test
+        # The amd64 Docker image was imported from the exact archive above;
+        # arm64 was inspected/exported but is NOT claimed as a runtime smoke.
+        run: node deploy/standalone/container-smoke.mjs salcara-hub-standalone-ci:amd64
+      - name: Stage exact OCI binaries only after the amd64 runtime smoke passed
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          RELEASE_ROOT: ${{ steps.paths.outputs.root }}
+        run: |
+          node deploy/standalone/release-stage.mjs "$RELEASE_ROOT" "$VERSION"
       - uses: actions/upload-artifact@v4
+        id: artifact
         with:
           name: standalone-release-${{ steps.version.outputs.value }}
-          path: /tmp/standalone-release/
+          path: ${{ steps.paths.outputs.root }}/
+          compression-level: 0
           retention-days: 30
           if-no-files-found: error
   publish-image:
@@ -86,20 +126,54 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/setup-node@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+          node-version: '22'
+      - name: Install OCI copy tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          skopeo --version
+      - uses: actions/download-artifact@v4
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: VERSION=${{ needs.build.outputs.version }}
-          tags: ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:${{ needs.build.outputs.version }}
-          provenance: true
-          sbom: true
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/verified-release
+          merge-multiple: true
+      - name: Verify the exact successful build artifact before registry access
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
+          ARCHIVE_DIGEST: ${{ needs.build.outputs.archive_digest }}
+          RELEASE_ROOT: ${{ runner.temp }}/verified-release
+          OCI_LAYOUT: ${{ runner.temp }}/verified-oci
+        run: |
+          node deploy/standalone/release-image.mjs check-archive "$RELEASE_ROOT/image.tar" "$ARCHIVE_DIGEST"
+          skopeo copy --all --preserve-digests "oci-archive:$RELEASE_ROOT/image.tar" "oci:$OCI_LAYOUT:release"
+          node deploy/standalone/release-image.mjs verify "$OCI_LAYOUT" "$RELEASE_ROOT/image.tar" "$RELEASE_ROOT/image-receipt.json" "$VERSION" "$GITHUB_SHA" "$IMAGE_DIGEST" "$ARCHIVE_DIGEST"
+      - name: Reject existing versions and copy only the verified OCI artifact
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_AUTH_FILE: ${{ runner.temp }}/salcara-ghcr-auth.json
+          VERSION: ${{ needs.build.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
+          ARCHIVE_DIGEST: ${{ needs.build.outputs.archive_digest }}
+          RELEASE_ROOT: ${{ runner.temp }}/verified-release
+          OCI_LAYOUT: ${{ runner.temp }}/verified-oci
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$GHCR_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$GHCR_USERNAME" --password-stdin ghcr.io
+          node deploy/standalone/publish-image.mjs "$OCI_LAYOUT" "$RELEASE_ROOT/image.tar" "$RELEASE_ROOT/image-receipt.json" "$VERSION" "$GITHUB_SHA" "$IMAGE_DIGEST" "$ARCHIVE_DIGEST"
+      - name: Remove ephemeral registry authentication
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/salcara-ghcr-auth.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: published-image-receipt-${{ needs.build.outputs.version }}
+          path: ${{ runner.temp }}/verified-release/image-receipt.json
+          if-no-files-found: error
       # Signing is offline after artifact verification. No publisher private
       # key or production deployment belongs in this workflow.

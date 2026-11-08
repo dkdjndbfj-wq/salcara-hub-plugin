@@ -17,6 +17,10 @@ type Device struct {
 	Version  string          `json:"version"`
 	Tools    json.RawMessage `json:"tools"`
 	Projects json.RawMessage `json:"projects"`
+	// Capabilities is a small protocol-level feature list, separate from
+	// Agent tools. Older Bridges omit it and therefore cannot execute under a
+	// restricted source policy.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // DeviceStatus = Device + online + lastSeen (ms).
@@ -157,6 +161,7 @@ type device struct {
 	hasSecret         bool
 	pairHash          [32]byte
 	hasPair           bool
+	pairPending       bool // credential not published until persistence completes; guarded by Hub.mu
 	pairRevision      int64
 	phoneHash         string
 	bindingID         string
@@ -195,6 +200,8 @@ type account struct {
 	events                *ring
 	sessions              map[string]*sessionBuf
 	apps                  map[*appSub]struct{}
+	appStreams            int // admitted SSE handlers, even after apps removal; guarded by Hub.mu
+	eventWaiters          int // active empty /app/events reads; guarded by Hub.mu
 	// wake is closed (and replaced) whenever an event is appended, waking
 	// phones long-polling /app/events. Lazily created under h.mu.
 	wake chan struct{}
@@ -241,14 +248,15 @@ func (h *Hub) accountLocked(id string) *account {
 	a := h.accounts[id]
 	if a == nil {
 		a = &account{
-			owner:        h,
-			resource:     h.resource,
-			id:           id,
-			devices:      map[string]*device{},
-			seq:          h.seqBase,
-			sessions:     map[string]*sessionBuf{},
-			apps:         map[*appSub]struct{}{},
-			eventBatches: map[string]eventBatchReceipt{},
+			owner:                 h,
+			resource:              h.resource,
+			id:                    id,
+			devices:               map[string]*device{},
+			seq:                   h.seqBase,
+			sessionEvictedThrough: h.seqBase,
+			sessions:              map[string]*sessionBuf{},
+			apps:                  map[*appSub]struct{}{},
+			eventBatches:          map[string]eventBatchReceipt{},
 		}
 		h.accounts[id] = a
 	}
@@ -305,10 +313,18 @@ func (a *account) deviceStatusesLocked() []DeviceStatus {
 // appendEventLocked assigns the next seq, stores the event in the account and
 // session buffers and fans it out. fields is the decoded event object.
 func (a *account) appendEventLocked(deviceID string, fields map[string]json.RawMessage) (*storedEvent, error) {
+	seq := a.seq + 1
+	if a.owner != nil {
+		if err := a.owner.reserveEventSequenceLocked(seq); err != nil {
+			return nil, err
+		}
+	}
 	if a.events == nil {
 		a.events = newBoundedRing(a.resource.AccountEvents, a.resource.AccountEventBytes)
+		if a.owner != nil {
+			a.events.evictedThrough = a.owner.seqBase
+		}
 	}
-	seq := a.seq + 1
 	fields["seq"], _ = json.Marshal(seq)
 	fields["deviceId"], _ = json.Marshal(deviceID)
 	if _, ok := fields["ts"]; !ok {
@@ -322,8 +338,18 @@ func (a *account) appendEventLocked(deviceID string, fields map[string]json.RawM
 	if err != nil {
 		return nil, err
 	}
-	a.seq = seq
 	e := &storedEvent{seq: seq, deviceID: deviceID, sessionKey: sk, data: data}
+	a.publishEventLocked(e, fields)
+	return e, nil
+}
+
+// publishEventLocked is called only after the durable batch transaction commits.
+func (a *account) publishEventLocked(e *storedEvent, fields map[string]json.RawMessage) {
+	seq, deviceID, sk, data := e.seq, e.deviceID, e.sessionKey, e.data
+	a.seq = seq
+	if a.events == nil {
+		a.events = newBoundedRing(a.resource.AccountEvents, a.resource.AccountEventBytes)
+	}
 	a.events.push(e)
 	if a.wake != nil {
 		close(a.wake)
@@ -363,7 +389,6 @@ func (a *account) appendEventLocked(deviceID string, fields map[string]json.RawM
 		a.owner.trimGlobalCacheLocked()
 	}
 	a.sendLocked(sseMsg{event: "event", data: data, seq: seq, deviceID: deviceID})
-	return e, nil
 }
 
 func (a *account) evictSessionLocked() {

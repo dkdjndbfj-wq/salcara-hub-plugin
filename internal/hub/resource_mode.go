@@ -108,22 +108,20 @@ func (h *Hub) ApplyResourceMode(id string, before func() error) error {
 }
 
 func (h *Hub) appStreamCountLocked() int {
-	n := 0
-	for _, a := range h.accounts {
-		n += len(a.apps)
-	}
-	return n
+	return h.appStreams
 }
+
+// SSE and empty event long-polls are alternative transports for the same
+// phone. Count admitted handlers until they return, not the live subscriber
+// registry: dropping a slow subscriber does not unblock an in-flight write.
+// Resource-mode changes do not reset counts or cancel already accepted reads.
+func (h *Hub) appReadLimitReachedLocked(a *account) bool {
+	return a.appStreams+a.eventWaiters >= h.resource.MaxAppStreams ||
+		h.resource.MaxGlobalAppStreams > 0 && h.appStreamCountLocked()+h.eventWaiters >= h.resource.MaxGlobalAppStreams
+}
+
 func (h *Hub) bridgeStreamCountLocked() int {
-	n := 0
-	for _, a := range h.accounts {
-		for _, d := range a.devices {
-			if d.conn != nil {
-				n++
-			}
-		}
-	}
-	return n
+	return h.bridgeStreams
 }
 func (h *Hub) accountPendingCountLocked(id string) int {
 	n := 0

@@ -1,0 +1,35 @@
+groups:
+  - name: salcara-hub
+    rules:
+      - alert: SalcaraHubUnavailable
+        expr: up{job="salcara-hub"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Salcara Hub monitoring endpoint is unreachable"
+          description: "Check the service, reverse proxy, and scoped monitoring credential."
+      - alert: SalcaraHubCriticalIssue
+        expr: salcara_hub_critical_issues > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Salcara Hub requires immediate attention"
+          description: "Open the operations page to inspect disk reserve and audit durability."
+      - alert: SalcaraHubBackupOverdue
+        expr: salcara_hub_backup_timestamp_seconds == 0 or time() - salcara_hub_backup_timestamp_seconds > 604800
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Salcara Hub has no verified backup within seven days"
+          description: "Create an encrypted offline backup and store the archive and key separately."
+      - alert: SalcaraHubCapacityAttention
+        expr: salcara_hub_warning_issues > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Salcara Hub has unresolved operational warnings"
+          description: "Review storage quotas and backup state in the operations page."

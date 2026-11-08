@@ -1,9 +1,63 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Salcara · 连接说明</title><link rel="icon" href="./icon.svg" type="image/svg+xml"><link rel="stylesheet" href="./app.css"><script src="./help.js" defer></script></head>
-<body><main class="page help-page">
-<header class="header"><div class="brand">S</div><div><p class="eyebrow">SALCARA REMOTE</p><h1>把电脑上的进度带到手机</h1></div><span id="health" class="pill">未检查</span></header>
-<p class="intro">本站只负责设备配对与消息转发。模型由你的电脑工具调用；连接不需要提交模型 API Key，扫码绑定后直接使用，不设用户审批。</p>
-<section class="panel"><h2>连接步骤</h2><ol class="steps"><li>在电脑端填写本站地址，选择 Agent 和需要使用的 API，再检查远程通道。</li><li>电脑生成临时二维码；用 Salcara 手机端扫码绑定，只能连接自己的设备。</li><li>手机选择电脑和原会话，按需查看进度或发送任务。网络恢复后先查询原任务状态，不要重复提交。</li></ol><p class="muted">换中转站要重新配对。此页面不展示其他人的设备、会话或管理统计。</p></section>
-<section class="panel"><div class="section-title"><h2>公开通道检查</h2><button id="check" type="button" class="secondary">检查连接</button></div><p id="status" class="muted">仅检查本站 Hub，不能确认你的电脑已在线或 Codex 桌面已授权。</p><code id="hub-url"></code></section>
-<section class="panel"><h2>使用边界</h2><p class="muted">当前不是端到端加密，本站可读取转发内容，请只连接信任的站点。Codex 原桌面续聊需要明确安装和限时授权；Claude Desktop 普通聊天远控尚未完成。CLI 与原桌面会话是不同路径。</p><p class="muted">设备、配对和封禁保存于独立 Hub 数据卷。运行中的会话事件只是限量缓存，不是永久云端聊天备份。服务器省资源模式会缩短暂存历史；完整历史仍需要从电脑端读取。</p></section>
-</main></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer">
+  <title>Salcara Hub · 连接总览</title>
+  <script src="./public-theme.js"></script>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml"><link rel="stylesheet" href="./public.css">
+  <script src="./public-sources.js" defer></script><script src="./help.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header shell">
+  <a class="brand" href="./" aria-label="Salcara Hub 首页"><img src="./icon.svg" alt="" width="34" height="34"><span>Salcara <span class="brand-suffix">Hub</span></span><span class="brand-tag">CONNECT</span></a>
+  <nav aria-label="主导航"><a href="./" aria-current="page">连接总览</a><a href="./status">服务状态<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></a></nav>
+  <label class="theme-control"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5"/></svg><select id="theme-mode" aria-label="配色模式"><option value="system">跟随系统</option><option value="light">亮色模式</option><option value="dark">暗色模式</option></select></label>
+  <span class="header-meta">PUBLIC CONSOLE <span aria-hidden="true">/</span> 01</span>
+</header>
+<main id="main" class="shell dashboard">
+  <div class="board-heading"><div><p class="eyebrow">SALCARA NETWORK / OVERVIEW</p><h1>连接总览<span class="title-line" aria-hidden="true"></span></h1></div><button id="check" type="button" class="button secondary"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.5 6a8 8 0 0 1 13 2L20 12M4 12l.5 4a8 8 0 0 0 13 2"/></svg>重新检测</button></div>
+  <section class="overview-strip" aria-label="Hub 连接概况">
+    <div class="overview-stat"><span class="stat-label">HUB 通道</span><span id="health" class="pill">等待检测</span></div>
+    <div class="overview-stat"><span class="stat-label">运行版本</span><strong id="hub-version" class="stat-value">—</strong></div>
+    <div class="overview-stat"><span class="stat-label">最近检测</span><time id="home-checked-at" class="stat-value">—</time></div>
+    <div class="overview-stat overview-message"><span class="stat-label">连接反馈</span><p id="status" role="status">正在准备连接检测。</p></div>
+  </section>
+  <div class="home-detail-grid">
+    <section class="panel topology-panel" aria-labelledby="topology-heading">
+      <div class="panel-heading"><div class="panel-title"><span class="section-index">01</span><h2 id="topology-heading">连接拓扑</h2><span class="panel-kicker">CONNECTION MAP</span></div><span class="diagram-label">路径示意</span></div>
+      <div class="network-path" role="img" aria-label="连接路径示意：手机通过 Hub 与电脑连接，不表示设备实时在线状态。">
+        <div class="network-node"><span class="device-symbol"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/></svg></span><strong>手机端</strong><span>SALCARA</span></div>
+        <span class="network-link" aria-hidden="true"><i></i></span>
+        <div class="network-node hub-node"><span class="hub-orbit"><span class="hub-symbol"><img src="./icon.svg" alt="" width="64" height="64"></span></span><strong>Salcara Hub</strong><span>设备配对 / 消息转发</span></div>
+        <span class="network-link" aria-hidden="true"><i></i></span>
+        <div class="network-node"><span class="device-symbol"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 22h8m-4-5v5"/></svg></span><strong>电脑端</strong><span>BRIDGE</span></div>
+      </div>
+      <div class="topology-bottom"><span><i class="line-sample" aria-hidden="true"></i>设备连接路径</span><a href="./status">查看实时检测 <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></a></div>
+    </section>
+    <section class="panel access-panel" aria-labelledby="access-heading">
+      <div class="panel-heading"><div class="panel-title"><h2 id="access-heading">接入本站</h2><span class="panel-kicker">CLIENT ACCESS</span></div><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2"/></svg></div>
+      <p class="field-label" id="address-label">HUB 接入地址</p>
+      <div class="address-field"><code id="hub-url" aria-labelledby="address-label">正在读取本站地址…</code><button id="copy-hub-url" class="icon-button" type="button" aria-label="复制 Hub 地址" title="复制 Hub 地址"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button></div>
+      <p id="copy-status" class="field-hint" role="status">手机与电脑填写同一地址</p>
+      <p class="client-version-label">支持的客户端<span>本次配套版本</span></p>
+      <div class="client-downloads"><a href="https://github.com/dkdjndbfj-wq/salcara-desktop/releases" target="_blank" rel="noopener noreferrer" title="打开 Bridge 发布页"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></svg><span class="client-download-info"><span>Bridge 电脑端</span><strong data-client-version="bridge">v{{BRIDGE_CLIENT_VERSION}}</strong></span><span aria-hidden="true">↗</span></a><a href="https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases" target="_blank" rel="noopener noreferrer" title="打开 Android 手机端发布页"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18h2"/></svg><span class="client-download-info"><span>Android 手机端</span><strong data-client-version="mobile">v{{MOBILE_CLIENT_VERSION}}</strong></span><span aria-hidden="true">↗</span></a></div>
+      <p class="pairing-hint">手机「编程」<span aria-hidden="true">→</span>扫描电脑二维码</p>
+    </section>
+  </div>
+  <section class="panel services-section" aria-labelledby="sources-heading" aria-describedby="sources-scope">
+  <div class="panel-heading"><div class="panel-title"><span class="section-index">02</span><h2 id="sources-heading">服务开放状态</h2><span class="panel-kicker">SOURCE ACCESS</span></div><div class="source-total"><strong id="source-enabled-count">—</strong><span>类开放</span></div></div>
+  <ul class="source-grid">
+    <li class="source-item"><div class="source-name"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="7" rx="2"/><rect x="4" y="14" width="16" height="7" rx="2"/><path d="M8 6.5h.01M8 17.5h.01"/></svg><h3>本站 API</h3></div><span id="source-api-status" class="source-badge muted">确认中</span><p id="source-api-detail" class="source-meta">正在读取本站设置</p></li>
+    <li class="source-item"><div class="source-name"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg><h3>外站 API</h3></div><span id="source-external_api-status" class="source-badge muted">确认中</span><p id="source-external_api-detail" class="source-meta">正在读取本站设置</p></li>
+    <li class="source-item"><div class="source-name"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4v5c0 5-8 9-8 9s-8-4-8-9V7l8-4Z"/><path d="m8 12 3 3 5-6"/></svg><h3>反代账号</h3></div><span id="source-reverse_proxy-status" class="source-badge muted">确认中</span><p id="source-reverse_proxy-detail" class="source-meta">正在读取本站设置</p></li>
+    <li class="source-item"><div class="source-name"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg><h3>官方账号</h3></div><span id="source-official_account-status" class="source-badge muted">确认中</span><p id="source-official_account-detail" class="source-meta">正在读取本站设置</p></li>
+  </ul>
+  <p id="sources-scope" class="sr-only">显示本站配置的开放和授权状态，不代表上游服务连通、具体账号在线或额度充足。</p>
+  <div class="panel-bottom"><span>POLICY SYNC</span><span id="sources-refresh" role="status">同步中</span></div>
+</section>
+  <noscript><p class="scope-note">请启用 JavaScript 以读取连接地址和状态。</p></noscript>
+</main>
+<footer class="site-footer shell"><span>SALCARA HUB <span aria-hidden="true">/</span> CONNECTION CONSOLE</span><span class="footer-line" aria-hidden="true"></span><span>设备配对 · 任务接续</span></footer>
+</body>
+</html>

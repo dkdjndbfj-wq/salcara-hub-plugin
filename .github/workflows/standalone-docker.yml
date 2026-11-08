@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: [Dockerfile, .dockerignore, go.mod, compose.yml, compose.release.yml, 'licenses/**', LICENSE, THIRD_PARTY_NOTICES.md, 'deploy/standalone/**', 'internal/**', 'cmd/**', 'tools/**', '.github/workflows/standalone-docker.yml', '.github/workflows/standalone-release.yml']
+    paths: [Dockerfile, .dockerignore, go.mod, go.sum, compose.yml, compose.release.yml, 'licenses/**', LICENSE, THIRD_PARTY_NOTICES.md, 'deploy/standalone/**', 'internal/**', 'cmd/**', 'tools/**', '.github/workflows/standalone-docker.yml', '.github/workflows/standalone-release.yml']
   pull_request:
-    paths: [Dockerfile, .dockerignore, go.mod, compose.yml, compose.release.yml, 'licenses/**', LICENSE, THIRD_PARTY_NOTICES.md, 'deploy/standalone/**', 'internal/**', 'cmd/**', 'tools/**', '.github/workflows/standalone-docker.yml', '.github/workflows/standalone-release.yml']
+    paths: [Dockerfile, .dockerignore, go.mod, go.sum, compose.yml, compose.release.yml, 'licenses/**', LICENSE, THIRD_PARTY_NOTICES.md, 'deploy/standalone/**', 'internal/**', 'cmd/**', 'tools/**', '.github/workflows/standalone-docker.yml', '.github/workflows/standalone-release.yml']
 permissions:
   contents: read
 jobs:
@@ -24,6 +24,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: Download and verify dependencies against committed go.sum
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          go mod download
+          go mod verify
+          git diff --exit-code -- go.mod go.sum
       - name: Test and vet the complete module, including public feed tools
         env:
           GOTOOLCHAIN: local
@@ -33,8 +40,13 @@ jobs:
         env:
           SALCARA_HUB_PUBLIC_URL: https://relay.example.com/salcara-hub
         run: docker compose -f compose.yml config --quiet
-      - name: Test administrator UI privacy and interactions
-        run: node --test deploy/standalone/admin-ui.test.mjs
+      - name: Test installers without live Docker or network calls
+        run: |
+          bash -n deploy/standalone/install.sh deploy/standalone/create-bot-binding.sh deploy/standalone/resume-bot.sh deploy/standalone/install.test.sh deploy/standalone/bot-deploy.test.sh
+          bash deploy/standalone/install.test.sh
+          bash deploy/standalone/bot-deploy.test.sh
+      - name: Test public and administrator UI, permissions, and release tooling
+        run: node --test deploy/standalone/*.test.mjs
       - name: Build amd64 (tests and vet run inside the builder)
         run: docker buildx build --platform linux/amd64 --load --tag salcara-hub-standalone:ci .
       - name: Run isolated non-root container smoke test

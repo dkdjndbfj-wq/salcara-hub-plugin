@@ -166,16 +166,30 @@ func (s *fcmSender) accessToken(ctx context.Context) (string, error) {
 
 // send delivers one high-priority data message. Returns errPushTokenGone when
 // FCM reports the phone's token as unregistered or invalid.
-func (s *fcmSender) send(ctx context.Context, token string, data map[string]string, collapse string) error {
+func (s *fcmSender) send(ctx context.Context, token string, platform string, data map[string]string, collapse string, current func() bool) error {
 	access, err := s.accessToken(ctx)
 	if err != nil {
 		return err
 	}
+	// OAuth may have waited on the network while the phone changed stations,
+	// re-paired or disabled push. Drop that old job before the FCM request.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if current != nil && !current() {
+		return nil
+	}
 	android := map[string]any{"priority": "HIGH", "ttl": "3600s"}
 	if collapse != "" {
-		android["collapse_key"] = collapse
+		android["collapse_key"] = pushCollapseKey(collapse)
 	}
-	payload, _ := json.Marshal(map[string]any{"message": map[string]any{"token": token, "data": data, "android": android}})
+	message := map[string]any{"token": token, "data": data}
+	if platform == "ios" {
+		message["apns"] = apnsTaskConfig(data, collapse)
+	} else {
+		message["android"] = android
+	}
+	payload, _ := json.Marshal(map[string]any{"message": message})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint+"/v1/projects/"+s.projectID+"/messages:send", bytes.NewReader(payload))
 	if err != nil {
 		return err
@@ -214,4 +228,34 @@ func (s *fcmSender) send(ctx context.Context, token string, data map[string]stri
 		return errPushTokenGone
 	}
 	return fmt.Errorf("fcm: HTTP %d %s", resp.StatusCode, failure.Error.Status)
+}
+
+// Keep collapse identifiers within the 64-byte platform limit while binding
+// them to the station, device, session and turn in the input value.
+func pushCollapseKey(value string) string {
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return b64(sum[:])
+}
+
+func apnsTaskConfig(data map[string]string, collapse string) map[string]any {
+	agent := data["agent"]
+	if agent == "" {
+		agent = "Agent"
+	}
+	title, body := agent+" 有新回复", "点按查看回复"
+	switch data["kind"] {
+	case "done":
+		title, body = agent+" 完成了任务", "点按查看结果"
+	case "failed":
+		title, body = agent+" 的任务没有完成", "点按查看原因"
+	}
+	aps := map[string]any{"alert": map[string]string{"title": title, "body": body}, "sound": "default"}
+	headers := map[string]string{"apns-priority": "10", "apns-push-type": "alert"}
+	if collapse != "" {
+		headers["apns-collapse-id"] = pushCollapseKey(collapse)
+	}
+	return map[string]any{"headers": headers, "payload": map[string]any{"aps": aps}}
 }

@@ -35,7 +35,7 @@ func (h *Hub) statsLocked() Stats {
 			if device.conn != nil && !device.banned {
 				stats.OnlineDevices++
 			}
-			if device.hasPair && !device.banned {
+			if device.hasPair && !device.pairPending && !device.banned {
 				stats.PairedDevices++
 			}
 			if device.banned {

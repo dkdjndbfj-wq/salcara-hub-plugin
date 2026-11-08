@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,7 @@ type AdminQuery struct {
 	Filter string `json:"filter"`
 	Offset int    `json:"offset"`
 	Limit  int    `json:"limit"`
+	UserID string `json:"user_id,omitempty"`
 }
 
 var credentialLike = regexp.MustCompile(`(?i)(sk-[a-z0-9_-]{8,}|bearer\s|[a-f0-9]{64})`)
@@ -59,6 +61,11 @@ type AdminDevice struct {
 	WaitingApprovals int          `json:"waiting_approvals"`
 	Tools            []AdminTool  `json:"tools"`
 	Latency          latencyState `json:"latency"`
+	UserID           string       `json:"user_id,omitempty"`
+	UserName         string       `json:"user_name,omitempty"`
+	UserDisabled     bool         `json:"user_disabled"`
+	PolicyOverride   bool         `json:"policy_override"`
+	PairState        string       `json:"pair_state"`
 }
 
 func adminRef(accountID, deviceID string) string {
@@ -113,24 +120,48 @@ func (h *Hub) AdminSnapshotPage(q AdminQuery) any {
 	devices := []AdminDevice{}
 	for accountID, a := range h.accounts {
 		for id, d := range a.devices {
-			if q.Query != "" && !strings.Contains(strings.ToLower(d.info.Name+" "+d.info.OS), q.Query) {
+			userID, userName := h.managedUsers.Devices[id].UserID, ""
+			user := h.managedUserLocked(userID)
+			if user != nil {
+				userName = user.Name
+			}
+			if q.UserID == "unassigned" && userID != "" || q.UserID != "" && q.UserID != "unassigned" && userID != q.UserID {
 				continue
+			}
+			if q.Query != "" && !strings.Contains(strings.ToLower(d.info.Name+" "+d.info.OS+" "+userName+" "+adminRef(accountID, id)), q.Query) {
+				continue
+			}
+			pairState := "unpaired"
+			if d.hasPair && !d.banned {
+				if d.pairPending {
+					pairState = "pending"
+				} else if h.managedUsers.Devices[id].RevokedPair != hex.EncodeToString(d.pairHash[:]) {
+					pairState = "paired"
+				}
 			}
 			switch q.Filter {
 			case "online":
-				if d.conn == nil || d.banned {
+				if d.conn == nil || d.banned || h.userDisabledLocked(id) {
 					continue
 				}
 			case "offline":
-				if d.conn != nil && !d.banned {
+				if d.conn != nil && !d.banned && !h.userDisabledLocked(id) {
 					continue
 				}
 			case "paired":
-				if !d.hasPair || d.banned {
+				if pairState != "paired" {
 					continue
 				}
 			case "banned":
 				if !d.banned {
+					continue
+				}
+			case "unpaired":
+				if pairState == "paired" {
+					continue
+				}
+			case "disabled":
+				if !h.userDisabledLocked(id) {
 					continue
 				}
 			}
@@ -145,7 +176,7 @@ func (h *Hub) AdminSnapshotPage(q AdminQuery) any {
 				tools[i].Name = safeLabel(tools[i].Name, 128)
 				tools[i].Version = safeLabel(tools[i].Version, 64)
 			}
-			devices = append(devices, AdminDevice{Ref: adminRef(accountID, id), Name: safeLabel(d.info.Name, 256), OS: safeLabel(d.info.OS, 128), Version: safeLabel(d.info.Version, 128), Online: d.conn != nil && !d.banned, LastSeen: d.lastSeen, Paired: d.hasPair && !d.banned, Banned: d.banned, BanReason: d.banReason, BannedAt: d.bannedAt, RunningSessions: running, WaitingApprovals: waiting, Tools: tools, Latency: d.latency})
+			devices = append(devices, AdminDevice{Ref: adminRef(accountID, id), Name: safeLabel(d.info.Name, 256), OS: safeLabel(d.info.OS, 128), Version: safeLabel(d.info.Version, 128), Online: d.conn != nil && !d.banned && !h.userDisabledLocked(id), LastSeen: d.lastSeen, Paired: pairState == "paired", Banned: d.banned, BanReason: d.banReason, BannedAt: d.bannedAt, RunningSessions: running, WaitingApprovals: waiting, Tools: tools, Latency: d.latency, UserID: userID, UserName: userName, UserDisabled: h.userDisabledLocked(id), PolicyOverride: user != nil && user.Station != nil, PairState: pairState})
 		}
 	}
 	sort.Slice(devices, func(i, j int) bool {
@@ -156,6 +187,9 @@ func (h *Hub) AdminSnapshotPage(q AdminQuery) any {
 	})
 	total := len(devices)
 	start := min(q.Offset, total)
+	if total > 0 && start >= total {
+		start = ((total - 1) / q.Limit) * q.Limit
+	}
 	end := min(start+q.Limit, total)
 	devices = devices[start:end]
 	audit := append([]AdminAudit(nil), h.adminAudit...)
@@ -196,7 +230,7 @@ func (h *Hub) AdminActionAs(ctx context.Context, action, ref, reason, actor stri
 		}
 	}
 	h.mu.Lock()
-	if len(actor) > 64 || !regexp.MustCompile(`^(host-admin(:[0-9]+)?|standalone-admin)$`).MatchString(actor) {
+	if len(actor) > 64 || !regexp.MustCompile(`^(host-admin(:[0-9]+)?|standalone-admin|standalone-member:[a-f0-9]{24})$`).MatchString(actor) {
 		actor = "host-admin"
 	}
 	accountID, dev := h.adminDeviceLocked(ref)
@@ -309,6 +343,25 @@ func (h *Hub) recordCommandLocked(dev *device, elapsed time.Duration, success bo
 }
 
 func (h *Hub) executeCommand(ctx context.Context, accountID, deviceID string, command json.RawMessage, authorize func(*device) bool, expectedNonce string) (replyBody, int) {
+	return h.executeCommandGuarded(ctx, accountID, deviceID, command, authorize, expectedNonce, nil, nil)
+}
+
+func (h *Hub) commandWaitTimeout(commandType string) time.Duration {
+	// A saved explicit timeout is still authoritative, including an explicit
+	// 45s value. Only the built-in default adapts to the Bridge's longer Git work.
+	if h.cfg.commandTimeoutDefault && h.cfg.CommandTimeout == defaultCmdTimeout && (commandType == "workspace.git.read" || commandType == "workspace.git.mutate") {
+		return 95 * time.Second
+	}
+	return h.cfg.CommandTimeout
+}
+
+// executeCommandGuarded performs an optional final source-policy check under
+// remoteAccessGate immediately before putting the envelope on the computer
+// connection. The gate is held only for that check and channel send, not for
+// the potentially long AI response. This prevents a concurrent mode switch
+// from allowing a stale pre-switch decision to dispatch while keeping mode
+// changes non-blocking for an already delivered task.
+func (h *Hub) executeCommandGuarded(ctx context.Context, accountID, deviceID string, command json.RawMessage, authorize func(*device) bool, expectedNonce string, gate *sync.RWMutex, sourceCheck func() (string, *ExecutionSource)) (replyBody, int) {
 	var typ struct {
 		Type string `json:"type"`
 	}
@@ -321,11 +374,15 @@ func (h *Hub) executeCommand(ctx context.Context, accountID, deviceID string, co
 	if a != nil {
 		dev = a.devices[deviceID]
 	}
-	if dev == nil || dev.banned || (authorize != nil && !authorize(dev)) {
+	if dev == nil || dev.banned || h.userDisabledLocked(deviceID) || (authorize != nil && !authorize(dev)) {
 		h.mu.Unlock()
 		return replyBody{Error: "这台电脑尚未配对或已被封禁"}, 403
 	}
 	conn := dev.conn
+	if h.desktopUpdateRequired(dev.info.Version, command) {
+		h.mu.Unlock()
+		return replyBody{Error: h.desktopUpdateMessage()}, 426
+	}
 	standby := false
 	if conn == nil && authorize != nil {
 		conn = h.standbyCommandLocked(dev, command)
@@ -346,24 +403,84 @@ func (h *Hub) executeCommand(ctx context.Context, accountID, deviceID string, co
 	h.pending[id] = p
 	// Binding metadata comes from the authenticated station record, never the
 	// phone's command JSON. Administrator diagnostics do not grant phone access.
-	envelope := commandEnvelope{CommandID: id, DeviceID: deviceID, Command: command, TS: nowMs(), Phone: authorize != nil}
+	envelope := commandEnvelope{CommandID: id, DeviceID: deviceID, Command: command, TS: nowMs(), Phone: authorize != nil, EventScope: h.durableScopeLocked(accountID, dev)}
 	if authorize != nil {
 		envelope.BindingID, envelope.PhoneHash = dev.bindingID, dev.phoneHash
 	}
-	env, _ := json.Marshal(envelope)
 	h.mu.Unlock()
 	defer func() { h.mu.Lock(); delete(h.pending, id); h.mu.Unlock() }()
 	started := time.Now()
-	select {
-	case conn.cmds <- env:
-	case <-conn.closed:
-		return replyBody{Error: "电脑不在线"}, 409
-	default:
-		return replyBody{Error: "电脑正忙"}, 503
+	if gate != nil {
+		gate.RLock()
+		if sourceCheck != nil {
+			if code, source := sourceCheck(); code != "" {
+				gate.RUnlock()
+				return replyBody{Error: "远程来源策略拒绝此操作"}, 403
+			} else {
+				envelope.Source = source
+			}
+		}
+	}
+	env, _ := json.Marshal(envelope)
+	// Source verification may wait for policy/state locks. Revalidate the
+	// original device, binding and connection at the actual enqueue boundary;
+	// keep mu through the nonblocking send so replacement/revocation cannot
+	// slip between that check and admission. Receipt workers intentionally use
+	// their own background context once durably accepted.
+	rep, status := func() (replyBody, int) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if ctx.Err() != nil {
+			return replyBody{Error: "请求已取消"}, 499
+		}
+		select {
+		case <-h.done:
+			return replyBody{Error: "服务正在重启"}, 503
+		default:
+		}
+		current := h.accounts[accountID]
+		if current == nil || current.devices[deviceID] != dev || dev.banned || h.userDisabledLocked(deviceID) || (authorize != nil && !authorize(dev)) || envelope.EventScope != h.durableScopeLocked(accountID, dev) {
+			return replyBody{Error: "这台电脑尚未配对或已被封禁"}, 403
+		}
+		if !standby && dev.conn != conn || standby && h.standbyCommandLocked(dev, command) != conn {
+			return replyBody{Error: "电脑不在线"}, 409
+		}
+		if h.desktopUpdateRequired(dev.info.Version, command) {
+			return replyBody{Error: h.desktopUpdateMessage()}, 426
+		}
+		// A closed connection can still have room in cmds; a single select
+		// would randomly enqueue instead of choosing its closed signal.
+		select {
+		case <-conn.closed:
+			return replyBody{Error: "电脑不在线"}, 409
+		default:
+		}
+		select {
+		case conn.cmds <- env:
+			return replyBody{}, 0
+		case <-conn.closed:
+			return replyBody{Error: "电脑不在线"}, 409
+		default:
+			return replyBody{Error: "电脑正忙"}, 503
+		}
+	}()
+	if gate != nil {
+		gate.RUnlock()
+	}
+	if status != 0 {
+		return rep, status
 	}
 	h.log.Info("command sent", "account", accountID, "deviceId", deviceID, "commandId", id, "type", typ.Type)
-	timer := time.NewTimer(h.cfg.CommandTimeout)
+	timer := time.NewTimer(h.commandWaitTimeout(typ.Type))
 	defer timer.Stop()
+	acceptedReceipt, _ := ctx.Value(acceptedReceiptContextKey{}).(bool)
+	connectionClosed := conn.closed
+	if acceptedReceipt {
+		// The Bridge executes accepted commands independently of its SSE socket.
+		// Keep the original receiver/deadline through a reconnect so its HTTP
+		// reply can complete the receipt, without sending the command again.
+		connectionClosed = nil
+	}
 	select {
 	case rep := <-p.ch:
 		if expectedNonce != "" {
@@ -388,7 +505,11 @@ func (h *Hub) executeCommand(ctx context.Context, accountID, deviceID string, co
 			h.mu.Unlock()
 			return replyBody{Error: "设备授权已失效"}, 403
 		}
-		if !standby && dev.conn != conn || standby && dev.standby != conn {
+		if acceptedReceipt && authorize != nil && (dev.bindingID != envelope.BindingID || dev.phoneHash != envelope.PhoneHash) {
+			h.mu.Unlock()
+			return replyBody{Error: "设备授权已失效"}, 403
+		}
+		if !acceptedReceipt && (!standby && dev.conn != conn || standby && dev.standby != conn) {
 			h.mu.Unlock()
 			return replyBody{Error: "电脑连接已断开或更换"}, 409
 		}
@@ -402,7 +523,7 @@ func (h *Hub) executeCommand(ctx context.Context, accountID, deviceID string, co
 		return replyBody{Error: "电脑没有响应"}, 504
 	case <-ctx.Done():
 		return replyBody{Error: "请求已取消"}, 499
-	case <-conn.closed:
+	case <-connectionClosed:
 		return replyBody{Error: "电脑连接已断开"}, 409
 	case <-h.done:
 		return replyBody{Error: "服务正在重启"}, 503

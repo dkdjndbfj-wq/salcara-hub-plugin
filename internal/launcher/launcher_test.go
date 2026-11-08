@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -77,7 +78,7 @@ type fixture struct {
 	public   ed25519.PublicKey
 	feed     []byte
 	binary   []byte
-	requests int
+	requests atomic.Int32
 	cancel   context.CancelFunc
 }
 
@@ -110,7 +111,7 @@ func newFixture(t *testing.T) *fixture {
 	f := &fixture{manager: m, store: s, runner: runner, private: priv, public: pub, binary: []byte("verified fixture executable"), cancel: cancel}
 	f.feed = fixtureFeed(t, priv, testFeed(f.binary))
 	m.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		f.requests++
+		f.requests.Add(1)
 		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
 			t.Error("credentials forwarded to update host")
 		}
@@ -232,7 +233,7 @@ func TestPublicNetworkingAndPinnedDNS(t *testing.T) {
 }
 func acceptedFixture(t *testing.T, f *fixture) (Status, func(bool)) {
 	t.Helper()
-	if f.requests != 0 {
+	if f.requests.Load() != 0 {
 		t.Fatal("status performed unsolicited network request")
 	}
 	if f.manager.snapshot().CurrentVersion != "0.4.0-dev" {
@@ -391,7 +392,7 @@ func TestPrivateControlAndShutdownSeal(t *testing.T) {
 	if request("GET", "/status", "", "Bearer "+secret).Code != 200 {
 		t.Fatal("control rejected independent token")
 	}
-	if f.requests != 0 {
+	if f.requests.Load() != 0 {
 		t.Fatal("status made network request")
 	}
 	for _, body := range []string{`{"url":"https://example.com"}`, `{} {}`, `null`, `[]`} {

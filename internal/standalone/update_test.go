@@ -141,8 +141,8 @@ func TestUpdateProxyIndependentTokenStrictRequestAndAcceptedNotComplete(t *testi
 		return controlResponse(status, `{"configured":true,"current_version":"0.4.0-dev","latest_version":"0.4.1","status":"`+state+`","sha256":"`+strings.Repeat("a", 64)+`","release_notes":"Fixture notes","message":"Fixture","job_id":"fixture-job","private_unrecognized":"do-not-forward"}`), nil
 	})
 	state := adminRequest(t, s, http.MethodGet, Prefix+"/_admin/v1/state", admin, nil)
-	if state.Code != 200 || !strings.Contains(state.Body.String(), `"update_configured":true`) || calls != 0 {
-		t.Fatal("state polled updater without an explicit request")
+	if state.Code != 200 || !strings.Contains(state.Body.String(), `"update_configured":true`) || !strings.Contains(state.Body.String(), `"update_status":`) || calls != 1 {
+		t.Fatal("state did not include the cached launcher result")
 	}
 	for _, tc := range []struct {
 		method, path string
@@ -175,7 +175,7 @@ func TestUpdateProxyIndependentTokenStrictRequestAndAcceptedNotComplete(t *testi
 			t.Fatal("unsafe update body accepted")
 		}
 	}
-	if calls != 3 {
+	if calls != 4 {
 		t.Fatal("rejected request contacted updater or request was retried")
 	}
 }
@@ -185,6 +185,10 @@ func TestUpdateProxyRejectsRedirectOversizeInvalidAndSecretResponses(t *testing.
 	for _, raw := range []string{
 		strings.Repeat("x", (64<<10)+1),
 		`{"configured":true,"status":"available","message":"no current version"}`,
+		`{"configured":true,"current_version":"0.5.2","status":"current","auto_check":true,"check_interval_seconds":0}`,
+		`{"configured":true,"current_version":"0.5.2","status":"current","checked_at":"invalid"}`,
+		`{"configured":true,"current_version":"0.5.2","status":"current","next_check_at":"invalid"}`,
+		`{"configured":true,"current_version":"0.5.2","status":"current","check_interval_seconds":604801}`,
 		`{"configured":true,"current_version":"0.4.0-dev","status":"available","message":"` + control + `"}`,
 	} {
 		calls := 0
@@ -207,5 +211,39 @@ func TestUpdateProxyRejectsRedirectOversizeInvalidAndSecretResponses(t *testing.
 	s.control.client.Transport = fixtureTransport(func(r *http.Request) (*http.Response, error) { return nil, context.Canceled })
 	if w := adminRequest(t, s, http.MethodGet, Prefix+"/_admin/v1/update/status", admin, nil); w.Code != 502 || strings.Contains(w.Body.String(), "launcher") {
 		t.Fatal("internal connection failure leaked")
+	}
+}
+
+func TestUpdateAutomaticScheduleForwardedAndStatusFailureKeepsOverview(t *testing.T) {
+	s, admin, _ := controlFixture(t)
+	const raw = `{"configured":true,"current_version":"0.5.2","status":"current","auto_check":true,"checking":true,"checked_at":"2026-11-08T01:00:00Z","next_check_at":"2026-11-08T07:00:00Z","check_interval_seconds":21600}`
+	s.control.client.Transport = fixtureTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet || r.URL.Path != "/status" {
+			t.Fatal("overview caused a release check or mutation")
+		}
+		return controlResponse(200, raw), nil
+	})
+	for _, path := range []string{"/update/status", "/state"} {
+		w := adminRequest(t, s, http.MethodGet, Prefix+"/_admin/v1"+path, admin, nil)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		var body map[string]json.RawMessage
+		if json.Unmarshal(w.Body.Bytes(), &body) != nil {
+			t.Fatal("invalid response")
+		}
+		data := w.Body.Bytes()
+		if path == "/state" {
+			data = body["update_status"]
+		}
+		var got updateStatus
+		if json.Unmarshal(data, &got) != nil || !got.AutoCheck || !got.Checking || got.CheckedAt != "2026-11-08T01:00:00Z" || got.NextCheckAt != "2026-11-08T07:00:00Z" || got.CheckIntervalSeconds != 21600 {
+			t.Fatal("automatic schedule lost", string(data))
+		}
+	}
+	s.control.client.Transport = fixtureTransport(func(*http.Request) (*http.Response, error) { return nil, context.Canceled })
+	w := adminRequest(t, s, http.MethodGet, Prefix+"/_admin/v1/state", admin, nil)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"status":"unavailable"`) || !strings.Contains(w.Body.String(), `"stats":`) {
+		t.Fatal("launcher status failure broke overview", w.Body.String())
 	}
 }

@@ -43,11 +43,16 @@ type adminAccount struct {
 	Iterations int    `json:"iterations"`
 	Salt       string `json:"salt"`
 	Hash       string `json:"hash"`
+	Username   string `json:"username,omitempty"`
 }
 
 type adminSession struct {
-	CSRF    string
-	Expires time.Time
+	CSRF     string
+	Expires  time.Time
+	Actor    string
+	Name     string
+	Role     string
+	Username string
 }
 
 type loginWindow struct {
@@ -60,6 +65,7 @@ type adminAuth struct {
 	root       *os.Root
 	file       string
 	account    adminAccount
+	members    []adminMember
 	generation uint64
 	sessions   map[[32]byte]adminSession
 	loginIPs   map[string]loginWindow
@@ -163,7 +169,7 @@ func loadAdminAccount(root *os.Root, name string) (adminAccount, error) {
 	}
 	salt, saltErr := base64.RawStdEncoding.DecodeString(account.Salt)
 	hash, hashErr := base64.RawStdEncoding.DecodeString(account.Hash)
-	if account.Schema != 1 || account.Algorithm != "pbkdf2-sha256" || account.Iterations != passwordIterations || saltErr != nil || len(salt) != 32 || hashErr != nil || len(hash) != 32 {
+	if account.Schema != 1 || account.Username != "" && !validAdminUsername(account.Username) || account.Algorithm != "pbkdf2-sha256" || account.Iterations != passwordIterations || saltErr != nil || len(salt) != 32 || hashErr != nil || len(hash) != 32 {
 		return account, errors.New("administrator account file has unsupported password parameters")
 	}
 	return account, nil
@@ -201,6 +207,9 @@ func writePrivateNew(root *os.Root, name string, raw []byte) error {
 // It holds the same exclusive volume lock as a running Hub. The random initial
 // password is saved privately before publishing its derived account record.
 func InitAdminAccount(cfg Config) error {
+	if cfg.DeploymentMode == "" {
+		cfg.DeploymentMode = "station"
+	}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -209,6 +218,9 @@ func InitAdminAccount(cfg Config) error {
 		return err
 	}
 	defer lock.release()
+	if err := ensureDeploymentMode(cfg.DataDir, cfg.DeploymentMode); err != nil {
+		return err
+	}
 	root, err := openAuthRoot(cfg.DataDir)
 	if err != nil {
 		return err
@@ -253,7 +265,12 @@ func newAdminAuth(cfg Config) (*adminAuth, error) {
 		root.Close()
 		return nil, err
 	}
-	return &adminAuth{root: root, file: filepath.Base(cfg.AdminAccountFile), account: account, generation: 1, sessions: make(map[[32]byte]adminSession), loginIPs: make(map[string]loginWindow)}, nil
+	members, err := loadMembers(root)
+	if err != nil {
+		root.Close()
+		return nil, err
+	}
+	return &adminAuth{root: root, file: filepath.Base(cfg.AdminAccountFile), account: account, members: members, generation: 1, sessions: make(map[[32]byte]adminSession), loginIPs: make(map[string]loginWindow)}, nil
 }
 
 func (a *adminAuth) close() {
@@ -332,6 +349,10 @@ func (s *Server) authorizeAdmin(w http.ResponseWriter, r *http.Request) ([32]byt
 			failure(w, http.StatusUnsupportedMediaType, "请提交 JSON 请求")
 			return key, false
 		}
+	}
+	if !adminPermission(session, r) {
+		failure(w, http.StatusForbidden, "当前角色没有此操作权限，请联系主管理员")
+		return key, false
 	}
 	return key, true
 }
@@ -429,7 +450,7 @@ func (s *Server) serveAuth(w http.ResponseWriter, r *http.Request) {
 			failure(w, 401, "请重新登录")
 			return
 		}
-		respond(w, 200, map[string]string{"csrf_token": session.CSRF})
+		respond(w, 200, sessionResponse(session))
 	case "logout":
 		if !strictJSON(w, r, &struct{}{}) {
 			return
@@ -458,6 +479,7 @@ func acquirePasswordWork(w http.ResponseWriter) bool {
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Password string `json:"password"`
+		Username string `json:"username"`
 	}
 	if !strictJSON(w, r, &in) {
 		return
@@ -478,9 +500,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	defer func() { <-passwordSlots }()
 	s.auth.mu.Lock()
 	account, generation := s.auth.account, s.auth.generation
+	member, isMember := s.auth.memberForKeyLocked(in.Password)
 	s.auth.mu.Unlock()
-	if !verifyPassword(account, in.Password) {
+	if isMember && member.Role == "monitor" || !isMember && !verifyPassword(account, in.Password) {
 		failure(w, 401, "管理密钥错误")
+		return
+	}
+	// Legacy key-only accounts remain usable until the owner explicitly sets
+	// a username. Once configured, omitting or changing it cannot bypass login.
+	if isMember && in.Username != "" && in.Username != member.Name || !isMember && (account.Username != "" && in.Username != account.Username || account.Username == "" && in.Username != "" && in.Username != "admin") {
+		failure(w, 401, "账号或密码不正确")
 		return
 	}
 	token, err := randomSecret()
@@ -515,10 +544,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(s.auth.sessions, oldest)
 	}
-	s.auth.sessions[sha256.Sum256([]byte(token))] = adminSession{CSRF: csrf, Expires: now.Add(sessionTTL)}
+	session := adminSession{CSRF: csrf, Expires: now.Add(sessionTTL)}
+	session.Username = account.Username
+	if isMember {
+		session.Actor, session.Name, session.Role = member.ID, member.Name, member.Role
+		session.Username = member.Name
+	}
+	s.auth.sessions[sha256.Sum256([]byte(token))] = session
 	delete(s.auth.loginIPs, ip)
 	s.setAdminCookie(w, r, token)
-	respond(w, 200, map[string]string{"csrf_token": csrf})
+	respond(w, 200, sessionResponse(session))
 }
 
 // Rename is the credential commit point. Errors before it leave the previous
@@ -555,14 +590,19 @@ func (a *adminAuth) savePassword(account adminAccount, removeInitial bool) (bool
 
 func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, sessionKey [32]byte) {
 	var in struct {
-		Current string `json:"current_password"`
-		New     string `json:"new_password"`
+		Current  string  `json:"current_password"`
+		New      string  `json:"new_password"`
+		Username *string `json:"username"`
 	}
 	if !strictJSON(w, r, &in) {
 		return
 	}
 	if !validPassword(in.New) {
 		failure(w, 400, "新管理密钥需要 16–1024 字节")
+		return
+	}
+	if in.Username != nil && !validAdminUsername(*in.Username) {
+		failure(w, 400, "管理员账号需为 3–64 位字母、数字、点、横线或下划线")
 		return
 	}
 	if !validPassword(in.Current) {
@@ -594,6 +634,10 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, sessionK
 	if err != nil {
 		failure(w, 503, "更换管理密钥暂不可用")
 		return
+	}
+	updated.Username = account.Username
+	if in.Username != nil {
+		updated.Username = *in.Username
 	}
 	s.auth.mu.Lock()
 	defer s.auth.mu.Unlock()
@@ -689,6 +733,9 @@ func (a *adminAuth) resetPassword(password string) (bool, error) {
 // A true warning means the new hash committed but its directory fsync failed;
 // the recovery key already exists and the caller must report the warning.
 func ResetAdminKey(cfg Config) (warning bool, err error) {
+	if cfg.DeploymentMode == "" {
+		cfg.DeploymentMode = "station"
+	}
 	if err := cfg.Validate(); err != nil {
 		return false, err
 	}
@@ -697,6 +744,9 @@ func ResetAdminKey(cfg Config) (warning bool, err error) {
 		return false, err
 	}
 	defer lock.release()
+	if err := ensureDeploymentMode(cfg.DataDir, cfg.DeploymentMode); err != nil {
+		return false, err
+	}
 	auth, err := newAdminAuth(cfg)
 	if err != nil {
 		return false, err

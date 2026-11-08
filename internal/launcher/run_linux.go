@@ -68,7 +68,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	defer removeSameFile(ControlSocket, socketInfo)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	runner := &managedRunner{cfg: cfg}
+	runner := &managedRunner{cfg: cfg, volumeLock: lock}
 	state, err = s.startConfirmed(ctx, state, runner)
 	if err != nil {
 		listener.Close()
@@ -81,6 +81,11 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	server := &http.Server{Handler: &control{manager: m, tokenDigest: sha256.Sum256([]byte(token))}, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 10 * time.Second, MaxHeaderBytes: 4096}
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
+	checksDone := make(chan struct{})
+	go func() {
+		defer close(checksDone)
+		m.runAutoChecks()
+	}()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	logger.Info("Hub supervisor ready", "protocol", 1, "version", m.snapshot().CurrentVersion)
@@ -122,6 +127,7 @@ loop:
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = server.Shutdown(shutdownCtx)
 	shutdownCancel()
+	<-checksDone
 	m.job.Wait()
 	if e := runner.Stop(); e != nil && runErr == nil {
 		runErr = e

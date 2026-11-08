@@ -1,0 +1,39 @@
+# Optional Linux ingress deployment, on a host the operator controls.
+# Same-VPS installation is useful for testing; it does not create a better WAN route.
+name: salcara-edge
+services:
+  edge:
+    image: salcara-edge:local
+    build:
+      context: ../..
+      dockerfile: deploy/edge/Dockerfile
+    # Both listeners stay on loopback. The existing host HTTPS reverse proxy
+    # publishes only :8790; :8791 is for an authenticated private control channel.
+    network_mode: host
+    user: "65532:65532"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      SALCARA_EDGE_ORIGIN: "${SALCARA_EDGE_ORIGIN:?Set the fixed Hub origin; do not point back to the edge}"
+      SALCARA_EDGE_DATA_DIR: /data
+      SALCARA_EDGE_LISTEN: "127.0.0.1:8790"
+      SALCARA_EDGE_CONTROL_LISTEN: "127.0.0.1:8791"
+      SALCARA_EDGE_CONTROL_TOKEN_FILE: /run/secrets/edge-control-token
+      SALCARA_EDGE_TRUSTED_PROXY_CIDRS: "${SALCARA_EDGE_TRUSTED_PROXY_CIDRS:-}"
+    volumes:
+      - edge-data:/data
+      - ./secrets/edge-control-token:/run/secrets/edge-control-token:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  edge-data:

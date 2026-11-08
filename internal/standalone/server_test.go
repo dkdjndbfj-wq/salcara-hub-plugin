@@ -53,14 +53,22 @@ type fixtureSession struct {
 
 var fixtureSessions sync.Map
 
+func fixtureOrigin(s *Server) string {
+	if s.cfg.PublicURL == "" {
+		return "http://example.test"
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(s.cfg.PublicURL, "/"), Prefix)
+}
+
 func fixtureLogin(t *testing.T, s *Server, password string) fixtureSession {
 	t.Helper()
 	if cached, ok := fixtureSessions.Load(s); ok {
 		return cached.(fixtureSession)
 	}
 	body, _ := json.Marshal(map[string]string{"password": password})
-	r := httptest.NewRequest(http.MethodPost, "http://example.test"+Prefix+"/_admin/v1/auth/login", bytes.NewReader(body))
-	r.Header.Set("Origin", "http://example.test")
+	origin := fixtureOrigin(s)
+	r := httptest.NewRequest(http.MethodPost, origin+Prefix+"/_admin/v1/auth/login", bytes.NewReader(body))
+	r.Header.Set("Origin", origin)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, r)
@@ -90,11 +98,31 @@ func TestHealthReportsExactProcessIdentityWithoutCredential(t *testing.T) {
 	}
 }
 
+func TestAdminStateIncludesConfiguredPublicHubURL(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.PublicURL = "https://hub.example.com/salcara-hub"
+	if err := InitAdminAccount(cfg); err != nil {
+		t.Fatal(err)
+	}
+	password := initialPassword(t, cfg)
+	s, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	w := adminRequest(t, s, http.MethodGet, Prefix+"/_admin/v1/state", password, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"public_url":"https://hub.example.com/salcara-hub"`) {
+		t.Fatalf("admin state missing configured Hub address: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func adminRequest(t *testing.T, s *Server, method, path, token string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	b, _ := json.Marshal(body)
-	r := httptest.NewRequest(method, "http://example.test"+path, bytes.NewReader(b))
-	r.Header.Set("Origin", "http://example.test")
+	origin := fixtureOrigin(s)
+	r := httptest.NewRequest(method, origin+path, bytes.NewReader(b))
+	r.Header.Set("Origin", origin)
 	r.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		session := fixtureLogin(t, s, token)
@@ -108,7 +136,7 @@ func adminRequest(t *testing.T, s *Server, method, path, token string, body any)
 
 func TestStaticPagesStripInjectedCredentialsAndAdminCannotUseQueryCookies(t *testing.T) {
 	s, _, token := serverFixture(t)
-	for _, path := range []string{Prefix + "/", Prefix + "/admin/", Prefix + "/admin/app.js", Prefix + "/help.js", Prefix + "/app.css"} {
+	for _, path := range []string{Prefix + "/", Prefix + "/admin/", Prefix + "/admin/app.js", Prefix + "/help.js", Prefix + "/status", Prefix + "/status.js", Prefix + "/public-sources.js", Prefix + "/public-theme.js", Prefix + "/public.css", Prefix + "/app.css"} {
 		w := adminRequest(t, s, http.MethodGet, path+"?auth_token=relay-token&user_id=42", "", nil)
 		if w.Code != http.StatusSeeOther || w.Header().Get("Location") != path || strings.Contains(w.Body.String(), "relay-token") {
 			t.Fatalf("credential query retained in static page %s", path)
@@ -149,6 +177,92 @@ func TestStaticPagesStripInjectedCredentialsAndAdminCannotUseQueryCookies(t *tes
 	s.ServeHTTP(w, r)
 	if w.Code != 200 || w.Header().Get("Access-Control-Allow-Origin") != "" || strings.Contains(w.Body.String(), token) {
 		t.Fatal("safe authenticated state failed or exposed credentials")
+	}
+}
+
+func TestPublicStatusPageAndMinimalStatusEndpoint(t *testing.T) {
+	s, _, _ := serverFixture(t)
+	page := adminRequest(t, s, http.MethodGet, Prefix+"/status", "", nil)
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "./status.js") || !strings.Contains(page.Body.String(), "此状态只表示 Hub 接口当前可响应") {
+		t.Fatal("public status page did not render")
+	}
+	if page.Header().Get("Cache-Control") != "no-store" || page.Header().Get("Content-Security-Policy") == "" {
+		t.Fatal("status page privacy or CSP headers missing")
+	}
+
+	status := adminRequest(t, s, http.MethodGet, Prefix+"/statusz", "", nil)
+	var result map[string]json.RawMessage
+	if status.Code != http.StatusOK || json.Unmarshal(status.Body.Bytes(), &result) != nil || string(result["status"]) != `"available"` || len(result) != 2 {
+		t.Fatalf("minimal status response invalid: %d %s", status.Code, status.Body.String())
+	}
+	for _, secret := range []string{"pid", "device", "credential", "apiBases", "request_errors", "version"} {
+		if strings.Contains(status.Body.String(), secret) {
+			t.Fatalf("public status leaked internal field %q", secret)
+		}
+	}
+	if bad := adminRequest(t, s, http.MethodGet, Prefix+"/statusz?auth_token=must-not-echo", "", nil); bad.Code != http.StatusBadRequest || strings.Contains(bad.Body.String(), "must-not-echo") {
+		t.Fatal("status endpoint accepted or reflected query credentials")
+	}
+	if method := adminRequest(t, s, http.MethodPost, Prefix+"/statusz", "", nil); method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != "GET" {
+		t.Fatal("status endpoint accepted a non-read method")
+	}
+
+	s.hub.Close()
+	status = adminRequest(t, s, http.MethodGet, Prefix+"/statusz", "", nil)
+	if status.Code != http.StatusServiceUnavailable || json.Unmarshal(status.Body.Bytes(), &result) != nil || string(result["status"]) != `"unavailable"` {
+		t.Fatal("status endpoint reported a stopped Hub as available")
+	}
+}
+
+func TestAdminIssuedEnrollmentClaimIsOneTimeAndPersistsAcrossRestart(t *testing.T) {
+	s, cfg, password := serverFixture(t)
+	if denied := adminRequest(t, s, http.MethodPost, Prefix+"/_admin/v1/enrollment-claims", "", map[string]bool{"confirm": true}); denied.Code != http.StatusUnauthorized {
+		t.Fatal("unauthenticated caller minted enrollment claim")
+	}
+	issued := adminRequest(t, s, http.MethodPost, Prefix+"/_admin/v1/enrollment-claims", password, map[string]bool{"confirm": true})
+	var result struct {
+		Claim     string `json:"claim"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if issued.Code != http.StatusCreated || issued.Header().Get("Cache-Control") != "no-store" || json.Unmarshal(issued.Body.Bytes(), &result) != nil || len(result.Claim) != 64 || result.ExpiresAt == "" {
+		t.Fatalf("one-time claim was not returned privately: %d %s", issued.Code, issued.Body.String())
+	}
+	stored, err := os.ReadFile(filepath.Join(cfg.DataDir, "device-enrollment-claims.json"))
+	if err != nil || bytes.Contains(stored, []byte(result.Claim)) || !bytes.Contains(stored, []byte(`"claims"`)) {
+		t.Fatal("raw enrollment claim was exposed or its hash-only state was not persisted separately")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deviceState, err := os.ReadFile(filepath.Join(cfg.DataDir, "devices.json"))
+	if err != nil || bytes.Contains(deviceState, []byte(`"enrollmentClaims"`)) {
+		t.Fatal("enrollment claims changed the existing device database format")
+	}
+	restarted, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { restarted.Close() })
+	id, secret := "admin-issued-pc", strings.Repeat("a", 64)
+	r := httptest.NewRequest(http.MethodPost, "http://example.test"+Prefix+"/v1/device/register", bytes.NewReader([]byte(`{"deviceId":"admin-issued-pc"}`)))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Salcara-Device-Id", id)
+	r.Header.Set("X-Salcara-Device-Secret", secret)
+	r.Header.Set("X-Salcara-Enrollment-Claim", result.Claim)
+	w := httptest.NewRecorder()
+	restarted.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("issued claim did not survive restart: %d %s", w.Code, w.Body.String())
+	}
+	r = httptest.NewRequest(http.MethodPost, "http://example.test"+Prefix+"/v1/device/register", bytes.NewReader([]byte(`{"deviceId":"replay-pc"}`)))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Salcara-Device-Id", "replay-pc")
+	r.Header.Set("X-Salcara-Device-Secret", strings.Repeat("b", 64))
+	r.Header.Set("X-Salcara-Enrollment-Claim", result.Claim)
+	w = httptest.NewRecorder()
+	restarted.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("one-time claim replay succeeded: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -199,7 +313,22 @@ func TestActualHTTPQRAdminBanPersistenceAndRestart(t *testing.T) {
 	defer ts.Close()
 	client := ts.Client()
 	id, secret := "standalone-fixture-pc", strings.Repeat("ab", 32)
-	if code, _ := publicHTTP(t, client, ts.URL, http.MethodPost, "/device/register", id, secret, "", hub.Device{DeviceID: id, Name: "Fixture desktop"}); code != 200 {
+	claim, _, err := s.hub.CreateDeviceEnrollmentClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(hub.Device{DeviceID: id, Name: "Fixture desktop"})
+	register, _ := http.NewRequest(http.MethodPost, ts.URL+Prefix+"/v1/device/register", bytes.NewReader(body))
+	register.Header.Set("Content-Type", "application/json")
+	register.Header.Set("X-Salcara-Device-Id", id)
+	register.Header.Set("X-Salcara-Device-Secret", secret)
+	register.Header.Set("X-Salcara-Enrollment-Claim", claim)
+	registerResponse, err := client.Do(register)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerResponse.Body.Close()
+	if registerResponse.StatusCode != 200 {
 		t.Fatal("independent device registration failed")
 	}
 	ctx, cancel := context.WithCancel(context.Background())

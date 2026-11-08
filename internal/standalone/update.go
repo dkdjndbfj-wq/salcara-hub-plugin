@@ -14,14 +14,19 @@ import (
 )
 
 type updateStatus struct {
-	Configured     bool   `json:"configured"`
-	CurrentVersion string `json:"current_version"`
-	LatestVersion  string `json:"latest_version,omitempty"`
-	Status         string `json:"status"`
-	SHA256         string `json:"sha256,omitempty"`
-	ReleaseNotes   string `json:"release_notes,omitempty"`
-	Message        string `json:"message"`
-	JobID          string `json:"job_id,omitempty"`
+	Configured           bool   `json:"configured"`
+	CurrentVersion       string `json:"current_version"`
+	LatestVersion        string `json:"latest_version,omitempty"`
+	Status               string `json:"status"`
+	SHA256               string `json:"sha256,omitempty"`
+	ReleaseNotes         string `json:"release_notes,omitempty"`
+	Message              string `json:"message"`
+	JobID                string `json:"job_id,omitempty"`
+	AutoCheck            bool   `json:"auto_check"`
+	Checking             bool   `json:"checking"`
+	CheckedAt            string `json:"checked_at,omitempty"`
+	NextCheckAt          string `json:"next_check_at,omitempty"`
+	CheckIntervalSeconds int64  `json:"check_interval_seconds,omitempty"`
 }
 
 type controlClient struct {
@@ -85,6 +90,22 @@ func (c *controlClient) call(ctx context.Context, method, path string, body []by
 }
 
 func validUpdateStatus(s updateStatus) bool {
+	for _, stamp := range []string{s.CheckedAt, s.NextCheckAt} {
+		if stamp != "" {
+			if len(stamp) > 35 {
+				return false
+			}
+			if _, err := time.Parse(time.RFC3339, stamp); err != nil {
+				return false
+			}
+		}
+	}
+	if s.CheckIntervalSeconds < 0 || s.CheckIntervalSeconds > 7*24*60*60 {
+		return false
+	}
+	if s.AutoCheck && (!s.Configured || s.CheckIntervalSeconds < 5*60) {
+		return false
+	}
 	if len(s.CurrentVersion) > 96 || !updateVersionPattern.MatchString(s.CurrentVersion) || len(s.LatestVersion) > 96 || s.LatestVersion != "" && !updateVersionPattern.MatchString(s.LatestVersion) {
 		return false
 	}

@@ -48,6 +48,10 @@ docker() {
         'context inspect')
             if [[ "$stub_mode" == remote ]]; then printf 'ssh://test-only\n'; else printf 'unix:///test-only/docker.sock\n'; fi ;;
         'info --format') printf 'linux\n' ;;
+        'pull ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.3')
+            printf 'docker:pull\n' >> "$stub_calls"
+            [[ "$stub_mode" != pull_failure ]] ;;
+        'image inspect') printf '0.5.3\n' ;;
         'ps -aq')
             if [[ "$stub_mode" == existing_container ]]; then printf 'test-only-container\n'; fi ;;
         'volume ls')
@@ -83,18 +87,18 @@ docker() {
 curl() {
     local endpoint=${!#}
     case "$endpoint" in
-        'https://api.github.com/repos/dkdjndbfj-wq/salcara-hub-plugin/releases/tags/standalone-v0.5.2')
-            [[ "$stub_mode" != missing_release ]] || return 22
+        'https://api.github.com/repos/dkdjndbfj-wq/salcara-hub-plugin/releases/tags/standalone-v0.5.3')
+            [[ "$stub_mode" != missing_release && "$stub_mode" != missing_bot_release ]] || return 22
             if [[ "$stub_mode" == wrong_release ]]; then
                 printf '{"tag_name":"standalone-v0.5.0","draft":false,"prerelease":false}\n'
                 return
             fi
-            printf '{"tag_name":"standalone-v0.5.2","draft":false,"prerelease":false}\n' ;;
+            printf '{"tag_name":"standalone-v0.5.3","draft":false,"prerelease":false}\n' ;;
         'http://127.0.0.1:8787/healthz')
             if [[ "$stub_mode" == wrong_health ]]; then
                 printf '{"ok":true,"product":"salcara-hub-standalone","version":"0.4.0"}\n'
             else
-                printf '{"ok":true,"product":"salcara-hub-standalone","version":"0.5.2"}\n'
+                printf '{"ok":true,"product":"salcara-hub-standalone","version":"0.5.3"}\n'
             fi ;;
         *) printf 'UNEXPECTED_MOCK_OPERATION\n' >&2; return 99 ;;
     esac
@@ -129,7 +133,7 @@ expect_failure() {
 bash -n "$installer"
 help_output=$(bash "$installer" --help)
 assert_safe_output "$help_output"
-[[ "$help_output" == *'0.5.2'* && "$help_output" == *'--public-url'* ]] || exit 1
+[[ "$help_output" == *'0.5.3'* && "$help_output" == *'--public-url'* ]] || exit 1
 
 expect_failure 'noninteractive missing flags' '非交互运行必须提供' </dev/null
 expect_failure 'root path rejected' '安装目录必须' --public-url "$public_url" --install-dir /
@@ -147,6 +151,8 @@ stub_mode=missing_release
 expect_failure 'missing Release fails before files/init' '正式 Release 不存在或不可达' --public-url "$public_url" --install-dir "$test_target"
 stub_mode=wrong_release
 expect_failure 'wrong Release version fails before files/init' 'Release 标签不匹配' --public-url "$public_url" --install-dir "$test_target"
+stub_mode=missing_bot_release
+expect_failure 'missing shared Release in Bot mode creates no data' '正式 Release 不存在或不可达' --mode bot --public-url "$public_url" --install-dir "$test_target"
 
 # Test initialization gating after a mocked network failure. All filesystem
 # writes below are inside this test's new, dedicated sandbox.
@@ -156,8 +162,9 @@ pull_output=$(bash "$installer" --public-url "$public_url" --install-dir "$test_
 pull_status=$?
 set -e
 assert_safe_output "$pull_output"
-[[ $pull_status -ne 0 && "$pull_output" == *'没有初始化管理密钥'* && "$pull_output" != *'Hub 容器已就绪'* ]] || exit 1
+[[ $pull_status -ne 0 && "$pull_output" == *'尚未创建部署目录或初始化管理密钥'* && "$pull_output" != *'Hub 容器已就绪'* ]] || exit 1
 ! grep -Fxq 'compose:run' "$stub_calls"
+[[ ! -e "$test_sandbox/pull-failure" ]]
 [[ ! -e "$stub_data/admin-initial-login.txt" ]] || exit 1
 passed=$((passed + 1)); printf 'PASS: image pull failure never initializes\n'
 
@@ -167,7 +174,7 @@ health_output=$(bash "$installer" --public-url "$public_url" --install-dir "$tes
 health_status=$?
 set -e
 assert_safe_output "$health_output"
-[[ $health_status -ne 0 && "$health_output" == *'未确认 0.5.2 本地健康'* && "$health_output" != *'Hub 容器已就绪'* ]] || exit 1
+[[ $health_status -ne 0 && "$health_output" == *'未确认 0.5.3 本地健康'* && "$health_output" != *'Hub 容器已就绪'* ]] || exit 1
 [[ ! -e "$test_sandbox/wrong-health/secrets/admin-initial-login.txt" ]] || exit 1
 passed=$((passed + 1)); printf 'PASS: wrong-version health never claims completion or exports key\n'
 
@@ -178,12 +185,12 @@ success_output=$(bash "$installer" --public-url "$public_url" --install-dir "$su
 assert_safe_output "$success_output"
 [[ "$success_output" == *"$public_url/admin/"* && "$success_output" == *"$public_url/"* &&
    "$success_output" == *"cat -- $success_dir/secrets/admin-initial-login.txt"* &&
-   "$success_output" == *'公网反代仍需'* && "$success_output" != *'管理员账号'* ]] || exit 1
+   "$success_output" == *'脚本没有修改 Nginx'* && "$success_output" == *'首次管理员账号：admin'* ]] || exit 1
 [[ "$(<"$success_dir/secrets/admin-initial-login.txt")" == "$test_secret" ]] || exit 1
 [[ "$(stat -c '%a' "$success_dir/secrets")" == 700 &&
    "$(stat -c '%a' "$success_dir/secrets/admin-initial-login.txt")" == 600 &&
    "$(stat -c '%a' "$success_dir/.env")" == 600 ]] || exit 1
-grep -Fxq 'SALCARA_HUB_IMAGE_VERSION=0.5.2' "$success_dir/.env"
+grep -Fxq 'SALCARA_HUB_IMAGE_VERSION=0.5.3' "$success_dir/.env"
 grep -Fxq "SALCARA_HUB_PUBLIC_URL=$public_url" "$success_dir/.env"
 passed=$((passed + 1)); printf 'PASS: synthetic success protects key and gives URLs without key output\n'
 

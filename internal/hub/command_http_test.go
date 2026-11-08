@@ -50,8 +50,15 @@ func TestReceiptHTTPNativeUncertaintyAndAuthorization(t *testing.T) {
 	h.mu.Lock()
 	h.revokePairLocked("receipt-owner", h.accounts["receipt-owner"].devices["pc"])
 	h.mu.Unlock()
+	unsaved := requestHub(t, h, http.MethodPost, "/app/commands", "", "", token, body)
+	if unsaved.Code != http.StatusServiceUnavailable || !strings.Contains(unsaved.Body.String(), "pair_revoke_persistence_failed") || strings.Contains(unsaved.Body.String(), "refresh original conversation") || len(conn.cmds) != 0 {
+		t.Fatalf("unfinished revocation exposed a cached result or appeared final: %d %s", unsaved.Code, unsaved.Body)
+	}
+	if err := h.saveNowError(); err != nil {
+		t.Fatal(err)
+	}
 	forbidden := requestHub(t, h, http.MethodPost, "/app/commands", "", "", token, body)
-	if forbidden.Code != 403 || strings.Contains(forbidden.Body.String(), "refresh original conversation") {
+	if forbidden.Code != 403 || strings.Contains(forbidden.Body.String(), "refresh original conversation") || len(conn.cmds) != 0 {
 		t.Fatal("revoked phone read cached result")
 	}
 }

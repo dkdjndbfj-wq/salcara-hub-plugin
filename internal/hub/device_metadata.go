@@ -73,6 +73,14 @@ func prepareDeviceMetadata(info Device) (Device, int64, error) {
 	if !validDeviceInfo(info) || len(info.Tools)+len(info.Projects) > maxDeviceBody {
 		return Device{}, 0, errors.New("invalid or oversized device metadata")
 	}
+	if len(info.Capabilities) > 64 {
+		return Device{}, 0, errors.New("too many device capabilities")
+	}
+	for _, capability := range info.Capabilities {
+		if !policyID(capability) || len(capability) > 128 {
+			return Device{}, 0, errors.New("invalid device capability")
+		}
+	}
 	// Charge and retain the same compact, HTML-escaped JSON representation
 	// which Marshal saves. Otherwise escaping can increase raw-field charges
 	// after restart, and a nil RawMessage would become a newly charged null.
@@ -102,6 +110,9 @@ func prepareDeviceMetadata(info Device) (Device, int64, error) {
 	// Raw and encoded copies, identity/map overhead, and conservatively charged
 	// decoded collection slots all share the same global admission budget.
 	raw := len(info.DeviceID) + len(info.Name) + len(info.OS) + len(info.Version) + len(info.Tools) + len(info.Projects)
+	for _, capability := range info.Capabilities {
+		raw += len(capability)
+	}
 	return info, int64(deviceMetadataReserve+raw+len(encoded)) + 128*(tools+projects), nil
 }
 
@@ -116,6 +127,8 @@ func decodeStoredRecord(raw []byte, target any) error {
 		fields = map[string]bool{"device": true, "lastSeen": true, "secretHash": true, "pairHash": true, "phoneHash": true, "bindingId": true, "pairAttemptId": true, "banned": true, "banReason": true, "bannedAt": true}
 	case *AdminAudit:
 		fields = map[string]bool{"at": true, "action": true, "device_ref": true, "reason": true, "actor": true}
+	case *persistedEnrollmentClaim:
+		fields = map[string]bool{"hash": true, "expiresAt": true, "userId": true}
 	}
 	var walk func(int, map[string]bool, bool) error
 	walk = func(depth int, allowed map[string]bool, stringRequired bool) error {
@@ -150,9 +163,9 @@ func decodeStoredRecord(raw []byte, target any) error {
 					return errors.New("unknown persisted device JSON field")
 				}
 				keys[name] = true
-				childString = depth == 0 && (name == "secretHash" || name == "pairHash" || name == "phoneHash" || name == "bindingId" || name == "pairAttemptId")
+				childString = depth == 0 && (name == "secretHash" || name == "pairHash" || name == "phoneHash" || name == "bindingId" || name == "pairAttemptId" || name == "hash")
 				if depth == 0 && name == "device" {
-					childFields = map[string]bool{"deviceId": true, "name": true, "os": true, "version": true, "tools": true, "projects": true}
+					childFields = map[string]bool{"deviceId": true, "name": true, "os": true, "version": true, "tools": true, "projects": true, "capabilities": true}
 				}
 			}
 			if err := walk(depth+1, childFields, childString); err != nil {

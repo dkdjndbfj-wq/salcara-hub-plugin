@@ -33,10 +33,34 @@ func newDeviceHub(t *testing.T, cfg Config) *Hub {
 		t.Fatal(err)
 	}
 	t.Cleanup(h.Close)
+	if h.durable != nil {
+		h.durable.volumeProbe = healthyMailboxVolume
+	}
 	return h
 }
 
 func deviceRequest(t *testing.T, h *Hub, path, id, secret, token string, body any, ip string) *httptest.ResponseRecorder {
+	return deviceRequestWithEnrollmentClaim(t, h, path, id, secret, token, body, ip, "", true)
+}
+
+func deviceRequestWithoutEnrollmentClaim(t *testing.T, h *Hub, path, id, secret string, body any) *httptest.ResponseRecorder {
+	return deviceRequestWithEnrollmentClaim(t, h, path, id, secret, "", body, "", "", false)
+}
+
+func testEnrollmentClaim(t *testing.T, h *Hub) string {
+	t.Helper()
+	claim, ok := randomPairToken()
+	if !ok {
+		t.Fatal("cannot generate test enrollment claim")
+	}
+	hash, _ := enrollmentClaimHash(claim)
+	h.mu.Lock()
+	h.enrollmentClaims[hash] = time.Now().Add(deviceEnrollmentClaimTTL)
+	h.mu.Unlock()
+	return claim
+}
+
+func deviceRequestWithEnrollmentClaim(t *testing.T, h *Hub, path, id, secret, token string, body any, ip, claim string, testClaim bool) *httptest.ResponseRecorder {
 	t.Helper()
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -54,6 +78,25 @@ func deviceRequest(t *testing.T, h *Hub, path, id, secret, token string, body an
 	r.Header.Set("X-Salcara-Device-Id", id)
 	r.Header.Set("X-Salcara-Device-Secret", secret)
 	r.Header.Set("X-Salcara-Pair-Token", token)
+	if claim == "" && testClaim && path == "/device/register" {
+		h.mu.Lock()
+		a := h.accounts[deviceAccount(id)]
+		needsClaim := a == nil || a.devices[id] == nil
+		if needsClaim && h.IsRunning() {
+			var ok bool
+			claim, ok = randomPairToken()
+			if !ok {
+				h.mu.Unlock()
+				t.Fatal("cannot generate test enrollment claim")
+			}
+			hash, _ := enrollmentClaimHash(claim)
+			h.enrollmentClaims[hash] = time.Now().Add(deviceEnrollmentClaimTTL)
+		}
+		h.mu.Unlock()
+	}
+	if claim != "" {
+		r.Header.Set("X-Salcara-Enrollment-Claim", claim)
+	}
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -131,6 +174,90 @@ func TestDevicePairingDoesNotConsultStationUserOrModelKey(t *testing.T) {
 	ping := requestHub(t, h, http.MethodGet, "/ping", "", "", "", nil)
 	if !strings.Contains(ping.Body.String(), `"device-pairing"`) || !strings.Contains(ping.Body.String(), `"protocolVersion":1`) {
 		t.Fatalf("missing discovery %s", ping.Body)
+	}
+}
+
+func TestNewDeviceEnrollmentRequiresSingleUseClaimAndKeepsExistingReconnect(t *testing.T) {
+	h := newDeviceHub(t, Config{})
+	secret := strings.Repeat("a", 64)
+	info := Device{DeviceID: "claim-bound-pc", Name: "Fixture PC"}
+	if w := deviceRequestWithoutEnrollmentClaim(t, h, "/device/register", info.DeviceID, secret, info); w.Code != http.StatusForbidden {
+		t.Fatalf("uninvited enrollment accepted: %d %s", w.Code, w.Body)
+	}
+	if len(h.accounts) != 0 || h.deviceMetadataBytes != 0 {
+		t.Fatal("uninvited enrollment allocated identity or metadata")
+	}
+	claim, _, err := h.CreateDeviceEnrollmentClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := deviceRequestWithEnrollmentClaim(t, h, "/device/register", info.DeviceID, secret, "", info, "", strings.ToUpper(claim), false); w.Code != http.StatusOK {
+		t.Fatalf("valid claim rejected: %d %s", w.Code, w.Body)
+	}
+	other := Device{DeviceID: "claim-replay-pc"}
+	if w := deviceRequestWithEnrollmentClaim(t, h, "/device/register", other.DeviceID, strings.Repeat("b", 64), "", other, "", claim, false); w.Code != http.StatusForbidden {
+		t.Fatalf("claim replay accepted: %d %s", w.Code, w.Body)
+	}
+	if w := deviceRequestWithoutEnrollmentClaim(t, h, "/device/register", info.DeviceID, secret, info); w.Code != http.StatusOK {
+		t.Fatalf("existing device reconnect needed a fresh claim: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestEnrollmentClaimSurvivesRestartExpiresAndDoesNotBurnOnCapacity(t *testing.T) {
+	dir := t.TempDir()
+	h := newDeviceHub(t, Config{DataDir: dir})
+	claim, _, err := h.CreateDeviceEnrollmentClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.saveNowError(); err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+	h = newDeviceHub(t, Config{DataDir: dir})
+	info := Device{DeviceID: "capacity-claim-pc"}
+	secret := strings.Repeat("c", 64)
+	h.deviceMetadataLimit = 1
+	if w := deviceRequestWithEnrollmentClaim(t, h, "/device/register", info.DeviceID, secret, "", info, "", claim, false); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("full Hub admitted enrollment: %d %s", w.Code, w.Body)
+	}
+	h.mu.Lock()
+	claimRemains := false
+	if hash, ok := enrollmentClaimHash(claim); ok {
+		claimRemains = h.enrollmentClaimValidLocked(hash)
+	}
+	h.mu.Unlock()
+	if !claimRemains {
+		t.Fatal("capacity rejection consumed invitation")
+	}
+	h.deviceMetadataLimit = maxDeviceMetadataBytes
+	if w := deviceRequestWithEnrollmentClaim(t, h, "/device/register", info.DeviceID, secret, "", info, "", claim, false); w.Code != http.StatusOK {
+		t.Fatalf("persisted invitation did not survive restart: %d %s", w.Code, w.Body)
+	}
+	if err := h.saveNowError(); err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+	h = newDeviceHub(t, Config{DataDir: dir})
+	h.mu.Lock()
+	claimRemains = false
+	if hash, ok := enrollmentClaimHash(claim); ok {
+		claimRemains = h.enrollmentClaimValidLocked(hash)
+	}
+	h.mu.Unlock()
+	if claimRemains {
+		t.Fatal("spent invitation became valid after restart")
+	}
+	expired, _, err := h.CreateDeviceEnrollmentClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredHash, _ := enrollmentClaimHash(expired)
+	h.mu.Lock()
+	h.enrollmentClaims[expiredHash] = time.Now().Add(-time.Second)
+	h.mu.Unlock()
+	if w := deviceRequestWithEnrollmentClaim(t, h, "/device/register", "expired-claim-pc", strings.Repeat("d", 64), "", Device{DeviceID: "expired-claim-pc"}, "", expired, false); w.Code != http.StatusForbidden {
+		t.Fatalf("expired invitation accepted: %d %s", w.Code, w.Body)
 	}
 }
 

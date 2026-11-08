@@ -114,14 +114,46 @@ func pairPhone(t *testing.T, h *Hub, id, secret string) string {
 const fcmToken = "fcm-token-fixture:APA91bExampleTokenValue_0123456789"
 
 func registerPush(t *testing.T, h *Hub, id, pair, token string) map[string]any {
+	return registerPushPlatform(t, h, id, pair, token, "android")
+}
+
+func registerPushPlatform(t *testing.T, h *Hub, id, pair, token, platform string) map[string]any {
 	t.Helper()
-	w := deviceRequest(t, h, "/app/push/register", "", "", pair, map[string]string{"deviceId": id, "token": token, "platform": "android"}, "")
+	w := deviceRequest(t, h, "/app/push/register", "", "", pair, map[string]string{"deviceId": id, "token": token, "platform": platform}, "")
 	if w.Code != 200 {
 		t.Fatalf("register push: %d %s", w.Code, w.Body)
 	}
 	var out map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	return out
+}
+
+func TestIOSPushUsesGenericAPNSAlert(t *testing.T) {
+	h, google := pushHub(t, t.TempDir())
+	id, secret := "ios-push", strings.Repeat("a", 64)
+	pair := pairPhone(t, h, id, secret)
+	if got := registerPushPlatform(t, h, id, pair, fcmToken, "ios"); got["push"] != "fcm" {
+		t.Fatalf("register iOS push: %v", got)
+	}
+	phoneIdle(h, id)
+	postTurn(t, h, id, secret, map[string]any{"type": "turn", "sessionKey": "codex:ios", "tool": "codex", "status": "completed", "turnId": "turn-1", "text": "private output", "ts": time.Now().UnixMilli()})
+	msg := waitMessages(t, google, 1)[0]["message"].(map[string]any)
+	if _, ok := msg["android"]; ok {
+		t.Fatal("iOS token received Android-only config")
+	}
+	apns := msg["apns"].(map[string]any)
+	headers := apns["headers"].(map[string]any)
+	if headers["apns-priority"] != "10" || headers["apns-push-type"] != "alert" || len(headers["apns-collapse-id"].(string)) > 64 {
+		t.Fatalf("invalid APNs delivery headers: %v", headers)
+	}
+	aps := apns["payload"].(map[string]any)["aps"].(map[string]any)
+	alert := aps["alert"].(map[string]any)
+	if alert["title"] != "Codex 完成了任务" || alert["body"] != "点按查看结果" {
+		t.Fatalf("unexpected generic APNs alert: %v", alert)
+	}
+	if strings.Contains(alert["body"].(string), "private output") {
+		t.Fatal("private task output leaked into the APNs alert")
+	}
 }
 
 func postTurn(t *testing.T, h *Hub, id, secret string, events ...map[string]any) {
@@ -191,31 +223,29 @@ func TestPushSendsOneGenericMessagePerNews(t *testing.T) {
 	}
 	phoneIdle(h, "pc-push")
 	done := map[string]any{"type": "turn", "sessionKey": "codex:s1", "tool": "codex", "status": "completed", "turnId": "t1", "text": "secret task output", "ts": time.Now().UnixMilli()}
-	postTurn(t, h, "pc-push", secret, done)
+	reply := map[string]any{"type": "message", "sessionKey": "codex:s1", "tool": "codex", "id": "m-final", "role": "assistant", "text": "private final reply", "final": true, "messagePhase": "final_answer", "turnId": "t1", "ts": time.Now().UnixMilli()}
+	postTurn(t, h, "pc-push", secret, reply)
+	postTurn(t, h, "pc-push", secret, done) // a final reply already notified this turn
 	postTurn(t, h, "pc-push", secret, done) // the computer retried the upload
 	ask := map[string]any{"type": "approval.request", "sessionKey": "codex:s1", "tool": "codex", "approvalId": "ap-7", "kind": "command", "title": "rm -rf build", "detail": "private detail", "ts": time.Now().UnixMilli()}
 	postTurn(t, h, "pc-push", secret, ask)
-	msgs := waitMessages(t, google, 2)
-	if len(msgs) != 2 {
-		t.Fatalf("want exactly 2 messages (retry deduplicated), got %d", len(msgs))
+	msgs := waitMessages(t, google, 1)
+	if len(msgs) != 1 {
+		t.Fatalf("want exactly 1 message (final reply replaces completion, approval suppressed), got %d", len(msgs))
 	}
 	first := msgs[0]["message"].(map[string]any)
 	data := first["data"].(map[string]any)
-	if first["token"] != fcmToken || data["kind"] != "done" || data["agent"] != "Codex" || data["deviceId"] != "pc-push" || data["sessionKey"] != "codex:s1" {
+	if first["token"] != fcmToken || data["kind"] != "reply" || data["agent"] != "Codex" || data["deviceId"] != "pc-push" || data["sessionKey"] != "codex:s1" {
 		t.Fatalf("unexpected message: %v", first)
 	}
-	if !strings.HasPrefix(data["id"].(string), "done:pc-push:codex:s1:") {
-		t.Fatalf("notification id must match the phone's own scheme: %v", data["id"])
-	}
 	blob, _ := json.Marshal(msgs)
-	for _, private := range []string{"secret task output", "rm -rf build", "private detail"} {
+	for _, private := range []string{"secret task output", "private final reply", "rm -rf build", "private detail"} {
 		if strings.Contains(string(blob), private) {
 			t.Fatalf("task text %q leaked into a push message", private)
 		}
 	}
-	second := msgs[1]["message"].(map[string]any)["data"].(map[string]any)
-	if second["kind"] != "ask" || second["id"] != "ask:pc-push:codex:s1:ap-7" {
-		t.Fatalf("approval message: %v", second)
+	if data["id"] != "task:pc-push:codex:s1:t1" {
+		t.Fatalf("reply notification id: %v", data["id"])
 	}
 	if android := first["android"].(map[string]any); android["priority"] != "HIGH" {
 		t.Fatal("task news must be high priority")
@@ -225,15 +255,35 @@ func TestPushSendsOneGenericMessagePerNews(t *testing.T) {
 	}
 }
 
-func TestPushWaitsWhileThePhoneIsActive(t *testing.T) {
+func TestPushCompletionAndFinalReplyShareOneNoticeInEitherArrivalOrder(t *testing.T) {
+	h, google := pushHub(t, t.TempDir())
+	secret := strings.Repeat("e", 64)
+	pair := pairPhone(t, h, "pc-order", secret)
+	registerPush(t, h, "pc-order", pair, fcmToken)
+	phoneIdle(h, "pc-order")
+	done := map[string]any{"type": "turn", "sessionKey": "codex:order", "tool": "codex", "status": "completed", "turnId": "turn-order", "ts": time.Now().UnixMilli()}
+	reply := map[string]any{"type": "message", "sessionKey": "codex:order", "tool": "codex", "id": "final-order", "role": "assistant", "text": "private reply", "final": true, "messagePhase": "final_answer", "turnId": "turn-order", "ts": time.Now().UnixMilli()}
+	postTurn(t, h, "pc-order", secret, done)
+	postTurn(t, h, "pc-order", secret, reply) // some adapters publish the final text after the completed status
+	msgs := waitMessages(t, google, 1)
+	if len(msgs) != 1 {
+		t.Fatalf("one turn should produce one user alert, got %d", len(msgs))
+	}
+	data := msgs[0]["message"].(map[string]any)["data"].(map[string]any)
+	if data["kind"] != "done" {
+		t.Fatalf("the first terminal event should own the single notice: %v", data)
+	}
+}
+
+func TestPushIsDeliveredWhilePhoneIsActiveForTheNativeForegroundGate(t *testing.T) {
 	h, google := pushHub(t, t.TempDir())
 	secret := strings.Repeat("d", 64)
 	pair := pairPhone(t, h, "pc-active", secret)
-	registerPush(t, h, "pc-active", pair, fcmToken) // this request marks the phone active
-	postTurn(t, h, "pc-active", secret, map[string]any{"type": "turn", "sessionKey": "s", "status": "failed", "ts": time.Now().UnixMilli()})
-	time.Sleep(200 * time.Millisecond)
-	if n := len(google.messages()); n != 0 {
-		t.Fatalf("pushed %d messages while the app was open", n)
+	registerPush(t, h, "pc-active", pair, fcmToken) // recent Hub activity is not reliable foreground state
+	postTurn(t, h, "pc-active", secret, map[string]any{"type": "turn", "sessionKey": "s", "status": "failed", "turnId": "active-turn", "ts": time.Now().UnixMilli()})
+	msgs := waitMessages(t, google, 1)
+	if len(msgs) != 1 || msgs[0]["message"].(map[string]any)["data"].(map[string]any)["kind"] != "failed" {
+		t.Fatalf("eligible foreground-time event must reach the device-side visibility gate: %v", msgs)
 	}
 }
 

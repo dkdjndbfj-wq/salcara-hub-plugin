@@ -24,7 +24,7 @@ const Prefix = "/salcara-hub"
 
 // Version is set by the standalone release build via -ldflags -X. The
 // launcher verifies this exact value in /healthz before completing an update.
-var Version = "0.5.2-dev"
+var Version = "0.5.3-dev"
 
 const Product = "salcara-hub-standalone"
 
@@ -32,15 +32,21 @@ const defaultListen = ":8787"
 const defaultAccountFile = "admin-account.json"
 
 type Config struct {
-	DataDir          string
-	AdminAccountFile string
-	Listen           string
-	PublicURL        string
-	CommandTimeout   time.Duration
-	PingInterval     time.Duration
-	ControlSocket    string
-	ControlTokenFile string
-	ResourceMode     string
+	DesktopMinimumVersion  string
+	DesktopUpdateURL       string
+	DeploymentMode         string
+	DataDir                string
+	AdminAccountFile       string
+	Listen                 string
+	PublicURL              string
+	CommandTimeout         time.Duration
+	commandTimeoutDefault  bool
+	PingInterval           time.Duration
+	ControlSocket          string
+	ControlTokenFile       string
+	ResourceMode           string
+	RemoteAccessMode       string
+	RemoteAccessPolicyFile string
 	// Initial inactive-computer cleanup in days (0 = off) until the admin page
 	// saves its own setting. Defaults: unpaired 7 days, paired off.
 	CleanupUnpairedDays int
@@ -54,15 +60,33 @@ type Config struct {
 	// notifications to paired phones. Empty = no push (phones fall back to
 	// their own background connection).
 	FCMCredentialsFile string
+	// Optional, deployment-owned connection to a Salcara Edge control service.
+	// Browser administrators never receive this URL or its private token.
+	NetworkControlURL       string
+	NetworkControlTokenFile string
+	EdgeArtifactDir         string
 }
 
 // ConfigFromEnv intentionally has no Sub2API URL, API key or legacy-auth
 // switch. An independent deployment never calls the model relay.
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
-	c := Config{DataDir: getenv("SALCARA_HUB_DATA_DIR"), AdminAccountFile: getenv("SALCARA_HUB_ADMIN_ACCOUNT_FILE"), Listen: getenv("SALCARA_HUB_LISTEN"), PublicURL: getenv("SALCARA_HUB_PUBLIC_URL")}
+	c := Config{DeploymentMode: strings.TrimSpace(getenv("SALCARA_HUB_MODE")), DataDir: getenv("SALCARA_HUB_DATA_DIR"), AdminAccountFile: getenv("SALCARA_HUB_ADMIN_ACCOUNT_FILE"), Listen: getenv("SALCARA_HUB_LISTEN"), PublicURL: getenv("SALCARA_HUB_PUBLIC_URL")}
+	if c.DeploymentMode == "" {
+		c.DeploymentMode = "station"
+	}
 	c.ControlSocket, c.ControlTokenFile = getenv("SALCARA_HUB_CONTROL_SOCKET"), getenv("SALCARA_HUB_CONTROL_TOKEN_FILE")
 	c.ResourceMode = getenv("SALCARA_HUB_RESOURCE_MODE")
+	c.RemoteAccessMode = strings.TrimSpace(getenv("SALCARA_HUB_REMOTE_ACCESS_MODE"))
+	c.RemoteAccessPolicyFile = strings.TrimSpace(getenv("SALCARA_HUB_REMOTE_ACCESS_POLICY_FILE"))
 	c.FCMCredentialsFile = strings.TrimSpace(getenv("SALCARA_HUB_FCM_CREDENTIALS_FILE"))
+	c.NetworkControlURL = strings.TrimSpace(getenv("SALCARA_HUB_NETWORK_CONTROL_URL"))
+	c.NetworkControlTokenFile = strings.TrimSpace(getenv("SALCARA_HUB_NETWORK_CONTROL_TOKEN_FILE"))
+	c.EdgeArtifactDir = strings.TrimSpace(getenv("SALCARA_HUB_EDGE_ARTIFACT_DIR"))
+	c.DesktopMinimumVersion = strings.TrimSpace(getenv("SALCARA_HUB_DESKTOP_MINIMUM_VERSION"))
+	c.DesktopUpdateURL = strings.TrimSpace(getenv("SALCARA_HUB_DESKTOP_UPDATE_URL"))
+	if err := hub.ValidateDesktopCompatibility(c.DesktopMinimumVersion, c.DesktopUpdateURL); err != nil {
+		return Config{}, err
+	}
 	switch strings.ToLower(strings.TrimSpace(getenv("SALCARA_HUB_TRUST_PROXY"))) {
 	case "", "0", "false", "no":
 	case "1", "true", "yes":
@@ -83,7 +107,9 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	if c.CleanupPairedDays, err = envDays(getenv("SALCARA_HUB_CLEANUP_PAIRED_DAYS"), 0); err != nil {
 		return Config{}, fmt.Errorf("SALCARA_HUB_CLEANUP_PAIRED_DAYS: %w", err)
 	}
-	c.CommandTimeout, err = envDuration(getenv("SALCARA_HUB_COMMAND_TIMEOUT"), 45*time.Second, time.Second, 120*time.Second)
+	commandTimeout := getenv("SALCARA_HUB_COMMAND_TIMEOUT")
+	c.commandTimeoutDefault = commandTimeout == ""
+	c.CommandTimeout, err = envDuration(commandTimeout, 45*time.Second, time.Second, 120*time.Second)
 	if err != nil {
 		return Config{}, fmt.Errorf("SALCARA_HUB_COMMAND_TIMEOUT: %w", err)
 	}
@@ -92,6 +118,16 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("SALCARA_HUB_PING_INTERVAL: %w", err)
 	}
 	return c, c.Validate()
+}
+
+// Keep an omitted environment setting distinct from an explicit 45s override.
+// The Hub owns command-specific defaults; Config still exposes the ordinary
+// default duration to existing validation and status consumers.
+func (c Config) hubCommandTimeout() time.Duration {
+	if c.commandTimeoutDefault && c.CommandTimeout == 45*time.Second {
+		return 0
+	}
+	return c.CommandTimeout
 }
 
 func envDays(raw string, fallback int) (int, error) {
@@ -118,17 +154,41 @@ func envDuration(raw string, fallback, minimum, maximum time.Duration) (time.Dur
 }
 
 func (c Config) Validate() error {
+	if c.EdgeArtifactDir != "" && (!filepath.IsAbs(c.EdgeArtifactDir) || filepath.Clean(c.EdgeArtifactDir) != c.EdgeArtifactDir) {
+		return errors.New("SALCARA_HUB_EDGE_ARTIFACT_DIR must be an absolute clean directory")
+	}
+	if err := validateNetworkControlConfig(c); err != nil {
+		return err
+	}
+	mode := c.DeploymentMode
+	if mode == "" {
+		mode = "station"
+	}
+	if mode != "station" && mode != "bot" {
+		return errors.New("SALCARA_HUB_MODE must be station or bot")
+	}
 	if c.FCMCredentialsFile != "" && !filepath.IsAbs(c.FCMCredentialsFile) {
 		return errors.New("SALCARA_HUB_FCM_CREDENTIALS_FILE must be an absolute path")
 	}
 	if c.ResourceMode != "" && c.ResourceMode != "economy" && c.ResourceMode != "balanced" && c.ResourceMode != "performance" {
 		return errors.New("SALCARA_HUB_RESOURCE_MODE must be economy, balanced, or performance")
 	}
+	if c.RemoteAccessMode != "" && c.RemoteAccessMode != "open" && c.RemoteAccessMode != "restricted" && c.RemoteAccessMode != "disabled" {
+		return errors.New("SALCARA_HUB_REMOTE_ACCESS_MODE must be open, restricted, or disabled")
+	}
+	if c.RemoteAccessPolicyFile != "" && (!filepath.IsAbs(c.RemoteAccessPolicyFile) || filepath.Clean(c.RemoteAccessPolicyFile) != c.RemoteAccessPolicyFile) {
+		return errors.New("SALCARA_HUB_REMOTE_ACCESS_POLICY_FILE must be an absolute clean path")
+	}
 	if c.DataDir == "" || !filepath.IsAbs(c.DataDir) || filepath.Clean(c.DataDir) == filepath.VolumeName(c.DataDir)+string(os.PathSeparator) {
 		return errors.New("SALCARA_HUB_DATA_DIR must be an absolute persistent non-root directory")
 	}
 	if c.AdminAccountFile == "" || !filepath.IsAbs(c.AdminAccountFile) || filepath.Clean(c.AdminAccountFile) != c.AdminAccountFile || filepath.Dir(c.AdminAccountFile) != filepath.Clean(c.DataDir) || filepath.Base(c.AdminAccountFile) == initialLoginFile || filepath.Base(c.AdminAccountFile) == ".salcara-hub.lock" {
 		return errors.New("SALCARA_HUB_ADMIN_ACCOUNT_FILE must be a clean absolute file path directly inside SALCARA_HUB_DATA_DIR")
+	}
+	for _, reserved := range []string{membersFile, operationsFile, backupReceiptFile} {
+		if strings.EqualFold(filepath.Base(c.AdminAccountFile), reserved) {
+			return errors.New("administrator credential path conflicts with a reserved operations file")
+		}
 	}
 	if (c.ControlSocket == "") != (c.ControlTokenFile == "") {
 		return errors.New("Hub update control socket and token file must both be configured, or both be absent")
@@ -147,6 +207,9 @@ func (c Config) Validate() error {
 		if _, err = origin(u); err != nil {
 			return errors.New("SALCARA_HUB_PUBLIC_URL has an invalid origin")
 		}
+	}
+	if mode == "bot" && c.PublicURL == "" {
+		return errors.New("bot deployment requires SALCARA_HUB_PUBLIC_URL")
 	}
 	if c.CommandTimeout < time.Second || c.CommandTimeout > 120*time.Second || c.PingInterval < 5*time.Second || c.PingInterval > time.Minute {
 		return errors.New("invalid Hub timeout configuration")

@@ -1,20 +1,95 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strconv"
 )
 
 const maxEventPageBytes = 2 << 20
 
 type eventPage struct {
-	Events        []json.RawMessage `json:"events"`
-	NextSeq       int64             `json:"nextSeq"`
-	LastSeq       int64             `json:"lastSeq"`
-	OldestSeq     int64             `json:"oldestSeq"`
-	HasMore       bool              `json:"hasMore"`
-	ResetRequired bool              `json:"resetRequired"`
+	StorageEpoch   string            `json:"storageEpoch,omitempty"`
+	Events         []json.RawMessage `json:"events"`
+	FeatureChanges []featureChange   `json:"featureChanges,omitempty"`
+	NextSeq        int64             `json:"nextSeq"`
+	LastSeq        int64             `json:"lastSeq"`
+	OldestSeq      int64             `json:"oldestSeq"`
+	HasMore        bool              `json:"hasMore"`
+	ResetRequired  bool              `json:"resetRequired"`
+}
+
+// This is a device/runtime invalidation snapshot, independent of the requested
+// session's event cursor. Never forward arbitrary event payloads in this lane.
+type featureChange struct {
+	Type     string `json:"type"`
+	Tool     string `json:"tool"`
+	DeviceID string `json:"deviceId"`
+	Seq      int64  `json:"seq"`
+}
+
+// Keep this aligned with the Bridge adapter registry's identifier contract.
+var featureAgentID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+func (h *Hub) featureChangesLocked(a *account, deviceID string) []featureChange {
+	if a == nil || a.events == nil || a.devices[deviceID] == nil {
+		return nil
+	}
+	var tools []struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(a.devices[deviceID].info.Tools, &tools) != nil {
+		return nil
+	}
+	registered := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		if featureAgentID.MatchString(tool.ID) {
+			registered[tool.ID] = true
+		}
+	}
+	var changes []featureChange
+	seen := make(map[string]bool)
+	// The existing account ring bounds both the scan and snapshot lifetime.
+	// Walk newest first so an older signal cannot replace the latest per tool.
+	for i := a.events.n - 1; i >= 0; i-- {
+		event := a.events.buf[(a.events.start+i)%len(a.events.buf)]
+		if event.deviceID != deviceID || event.sessionKey != "" {
+			continue
+		}
+		var signal struct {
+			Type       string  `json:"type"`
+			Tool       string  `json:"tool"`
+			SessionKey *string `json:"sessionKey"`
+			DeviceID   string  `json:"deviceId"`
+			Seq        int64   `json:"seq"`
+			TS         *int64  `json:"ts"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(event.data))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&signal) != nil || signal.Type != "features.changed" || signal.SessionKey == nil || *signal.SessionKey != "" ||
+			signal.DeviceID != deviceID || signal.Seq != event.seq || signal.Seq <= 0 || !registered[signal.Tool] || seen[signal.Tool] {
+			continue
+		}
+		seen[signal.Tool] = true
+		changes = append(changes, featureChange{Type: "features.changed", Tool: signal.Tool, DeviceID: deviceID, Seq: event.seq})
+	}
+	// Stable sequence order lets callers consume the snapshot without deriving
+	// anything from map iteration; it does not advance the session cursor.
+	for left, right := 0, len(changes)-1; left < right; left, right = left+1, right-1 {
+		changes[left], changes[right] = changes[right], changes[left]
+	}
+	return changes
+}
+
+func featureChangesAfter(changes []featureChange, after int64) bool {
+	for _, change := range changes {
+		if change.Seq > after {
+			return true
+		}
+	}
+	return false
 }
 
 func eventPageLimit(r *http.Request) (int, bool) {
@@ -34,6 +109,17 @@ func (h *Hub) readEventPageLocked(acct, deviceID, sessionKey string, after int64
 	a := h.accounts[acct]
 	if a == nil {
 		out.ResetRequired = after > 0
+		return out
+	}
+	out.FeatureChanges = h.featureChangesLocked(a, deviceID)
+	if h.durable != nil && a.devices[deviceID] != nil {
+		page, err := h.durable.eventPage(h.durableScopeLocked(acct, a.devices[deviceID]), sessionKey, after, limit)
+		if err == nil {
+			page.FeatureChanges = out.FeatureChanges
+			return page
+		}
+		out.ResetRequired = true
+		out.StorageEpoch = h.durable.epoch
 		return out
 	}
 	out.LastSeq = a.seq

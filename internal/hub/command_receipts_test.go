@@ -1,10 +1,14 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,14 +21,15 @@ const receiptRequestID = "10000000-0000-4000-8000-000000000001"
 
 func receiptFixture(t *testing.T, timeout time.Duration) (*Hub, *bridgeConn) {
 	t.Helper()
-	h, err := New(Config{DataDir: t.TempDir(), CommandTimeout: timeout, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	h, err := New(Config{DataDir: t.TempDir(), PublicURL: "https://example.com/salcara-hub", CommandTimeout: timeout, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(h.Close)
+	h.durable.volumeProbe = healthyMailboxVolume
 	conn := &bridgeConn{cmds: make(chan []byte, 10), closed: make(chan struct{})}
 	h.mu.Lock()
-	h.accountLocked("receipt-owner").devices["pc"] = &device{info: Device{DeviceID: "pc"}, conn: conn}
+	h.accountLocked("receipt-owner").devices["pc"] = &device{info: Device{DeviceID: "pc", Capabilities: []string{"source.guard.v1", "station.guard.v1"}}, conn: conn}
 	h.mu.Unlock()
 	return h, conn
 }
@@ -167,9 +172,108 @@ func TestReceiptOfflineHasNoTombstone(t *testing.T) {
 		t.Fatalf("offline: %d %s", status, code)
 	}
 }
+
+func TestCachedReceiptReplayRequiresCompletedOwnerAndExactHash(t *testing.T) {
+	h, conn := receiptFixture(t, time.Second)
+	const pairToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	credential := shaHex("\x00" + pairToken)
+	h.mu.Lock()
+	dev := h.accounts["receipt-owner"].devices["pc"]
+	h.setPairLocked("receipt-owner", dev, sha256.Sum256([]byte(pairToken)), true)
+	h.mu.Unlock()
+	command := json.RawMessage(`{"type":"session.send","text":"one"}`)
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = h.executeReceipt(context.Background(), "receipt-owner", "pc", credential, receiptRequestID, command, nil)
+		close(done)
+	}()
+	replyReceipt(t, h, conn, `{"accepted":true}`)
+	<-done
+	req := httptest.NewRequest("POST", "/api/app/commands", nil)
+	req.Header.Set("X-Salcara-Pair-Token", pairToken)
+	req.Header.Set("Authorization", "Bearer irrelevant-header")
+	if !h.cachedReceiptReplay("receipt-owner", req, commandReq{DeviceID: "pc", RequestID: receiptRequestID, Command: command}) {
+		t.Fatal("completed receipt was not eligible for cached replay")
+	}
+	if h.cachedReceiptReplay("receipt-owner", req, commandReq{DeviceID: "pc", RequestID: receiptRequestID, Command: json.RawMessage(`{"type":"session.send","text":"other"}`)}) {
+		t.Fatal("different command reused cached receipt")
+	}
+	if h.cachedReceiptReplay("receipt-owner", httptest.NewRequest("POST", "/api/app/commands", nil), commandReq{DeviceID: "pc", RequestID: receiptRequestID, Command: command}) {
+		t.Fatal("different owner reused cached receipt")
+	}
+}
+
+func TestRestrictedCommandReturnsOnlyCompletedCachedReceiptWithoutGrant(t *testing.T) {
+	h, conn := receiptFixture(t, time.Second)
+	const pairToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	credential := shaHex("\x00" + pairToken)
+	h.mu.Lock()
+	dev := h.accounts["receipt-owner"].devices["pc"]
+	h.setPairLocked("receipt-owner", dev, sha256.Sum256([]byte(pairToken)), true)
+	h.mu.Unlock()
+	command := json.RawMessage(`{"type":"session.send","text":"one"}`)
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = h.executeReceipt(context.Background(), "receipt-owner", "pc", credential, receiptRequestID, command, nil)
+		close(done)
+	}()
+	replyReceipt(t, h, conn, `{"accepted":true}`)
+	<-done
+	h.mu.Lock()
+	h.cfg.RemoteAccess.Mode, h.cfg.RemoteAccess.Revision, h.cfg.RemoteAccess.Audience = "restricted", "r1", "hub"
+	h.mu.Unlock()
+	body, _ := json.Marshal(map[string]any{"deviceId": "pc", "requestId": receiptRequestID, "command": json.RawMessage(command)})
+	r := httptest.NewRequest("POST", "/api/app/commands", bytes.NewReader(body))
+	r.Header.Set("X-Salcara-Pair-Token", pairToken)
+	w := httptest.NewRecorder()
+	h.handleAppCommands(w, r, "receipt-owner")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"requestId":"`+receiptRequestID+`"`) || len(conn.cmds) != 0 {
+		t.Fatalf("cached replay denied or redispatched: %d %s", w.Code, w.Body.String())
+	}
+	// A new request with no grant remains fail-closed under restricted mode.
+	newBody, _ := json.Marshal(map[string]any{"deviceId": "pc", "requestId": "20000000-0000-4000-8000-000000000002", "command": json.RawMessage(command)})
+	r = httptest.NewRequest("POST", "/api/app/commands", bytes.NewReader(newBody))
+	r.Header.Set("X-Salcara-Pair-Token", pairToken)
+	w = httptest.NewRecorder()
+	h.handleAppCommands(w, r, "receipt-owner")
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"source_policy_unavailable"`) {
+		t.Fatalf("new restricted command was not rejected: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestReceiptFinalPolicyCheckStopsModeSwitchBeforeDispatch(t *testing.T) {
+	h, conn := receiptFixture(t, time.Second)
+	const pairToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	credential := shaHex("\x00" + pairToken)
+	h.mu.Lock()
+	dev := h.accounts["receipt-owner"].devices["pc"]
+	h.setPairLocked("receipt-owner", dev, sha256.Sum256([]byte(pairToken)), true)
+	h.cfg.RemoteAccess.Mode = "open"
+	h.mu.Unlock()
+	command := json.RawMessage(`{"type":"session.send","text":"must-not-send"}`)
+	// Simulate the stale HTTP-level allow decision: the policy changes before
+	// the worker reaches its final guarded dispatch check.
+	h.mu.Lock()
+	h.cfg.RemoteAccess.Mode = "disabled"
+	h.mu.Unlock()
+	policyRequest := httptest.NewRequest("POST", "/api/app/commands", nil)
+	policyRequest.Header.Set("X-Salcara-Pair-Token", pairToken)
+	rep, status, code := h.executeReceiptWithPolicy(context.Background(), "receipt-owner", "pc", credential, receiptRequestID, command, nil, func() (string, *ExecutionSource) {
+		return h.executionSourceFor("receipt-owner", policyRequest, commandReq{DeviceID: "pc", RequestID: receiptRequestID, Command: command})
+	})
+	if status != 403 || code != "" || rep.Error != "远程来源策略拒绝此操作" || len(conn.cmds) != 0 {
+		t.Fatalf("stale policy dispatched: status=%d code=%s error=%s cmds=%d", status, code, rep.Error, len(conn.cmds))
+	}
+}
 func TestCursorPageGapAndDeviceIsolation(t *testing.T) {
 	h, _ := receiptFixture(t, time.Second)
+	// This case exercises the legacy bounded RAM ring. Durable pages are
+	// covered by the restart/cursor tests and do not truncate at ring eviction.
+	durable := h.durable
+	h.durable = nil
+	defer func() { h.durable = durable }()
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	account := h.accounts["receipt-owner"]
 	for i := 0; i < sessionRingSize+3; i++ {
 		fields := map[string]json.RawMessage{"type": json.RawMessage(`"message"`), "sessionKey": json.RawMessage(`"codex:s"`)}
@@ -190,5 +294,4 @@ func TestCursorPageGapAndDeviceIsolation(t *testing.T) {
 			t.Fatal("other device leaked")
 		}
 	}
-	h.mu.Unlock()
 }

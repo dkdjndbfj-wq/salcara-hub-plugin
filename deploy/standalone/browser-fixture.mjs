@@ -17,14 +17,24 @@ const login = await fetch(`${base}/_admin/v1/auth/login`, {
   body: JSON.stringify({ password: readFileSync(passwordFile, 'utf8').trim() }),
 });
 assert.equal(login.status, 200, 'refusing to seed any non-preview Hub');
+const csrf = (await login.json()).csrf_token;
+assert.match(csrf, /^[A-Za-z0-9_-]{32,128}$/);
 const headers = { Cookie: login.headers.get('set-cookie').split(';')[0] };
 const before = await fetch(`${base}/_admin/v1/state`, { headers });
 assert.equal(before.status, 200, 'refusing to seed any non-preview Hub');
 const abort = new AbortController();
 for (const [id, name, os] of [['salcara-preview-pc', '演示 · 办公室电脑', 'Windows'], ['salcara-preview-mac', '演示 · 移动工作站', 'macOS']]) {
+  const enrollment = await fetch(`${base}/_admin/v1/enrollment-claims`, {
+    method: 'POST', headers: { ...headers, Origin: 'http://127.0.0.1:19877', 'X-Salcara-CSRF': csrf, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: true }),
+  });
+  assert.equal(enrollment.status, 201, 'preview seeding needs a fresh one-time enrollment claim');
+  const claim = (await enrollment.json()).claim;
+  assert.match(claim, /^[a-f0-9]{64}$/);
   const secret = randomBytes(32).toString('hex');
-  const deviceHeaders = { 'X-Salcara-Device-Id': id, 'X-Salcara-Device-Secret': secret, 'Content-Type': 'application/json' };
-  const response = await fetch(`${base}/v1/device/register`, { method:'POST', headers:deviceHeaders, body:JSON.stringify({ deviceId:id, name, os, version:'QA fixture', projects:[], tools:[{id:'codex',name:'Codex · 演示上报',available:true,version:'测试数据'}] }) });
+  const deviceHeaders = { 'X-Salcara-Device-Id': id, 'X-Salcara-Device-Secret': secret };
+  const registrationHeaders = { ...deviceHeaders, 'X-Salcara-Enrollment-Claim': claim, 'Content-Type': 'application/json' };
+  const response = await fetch(`${base}/v1/device/register`, { method:'POST', headers:registrationHeaders, body:JSON.stringify({ deviceId:id, name, os, version:'QA fixture', projects:[], tools:[{id:'codex',name:'Codex · 演示上报',available:true,version:'测试数据'}] }) });
   assert.equal(response.status, 200, 'use a fresh preview data directory; do not change a real device secret');
   const stream = await fetch(`${base}/v1/bridge/stream?deviceId=${id}`, { headers:deviceHeaders, signal:abort.signal });
   assert.equal(stream.status,200);

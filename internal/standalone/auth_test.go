@@ -38,7 +38,7 @@ func freshLogin(t *testing.T, s *Server, password string) (*http.Cookie, string)
 	raw, _ := json.Marshal(map[string]string{"password": password})
 	w := authRequest(t, s, "POST", "auth/login", string(raw), "https://example.test", "")
 	var out map[string]string
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || len(out) != 1 || len(out["csrf_token"]) != 43 || len(w.Result().Cookies()) != 1 {
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || out["role"] != "owner" || out["actor"] != "owner" || len(out["csrf_token"]) != 43 || len(w.Result().Cookies()) != 1 {
 		t.Fatalf("password-only login failed: %d", w.Code)
 	}
 	return w.Result().Cookies()[0], out["csrf_token"]
@@ -63,7 +63,7 @@ func TestPasswordLoginCookieAndStrictOriginCSRFContract(t *testing.T) {
 		{"auth/login", string(raw), "https://attacker.example", 403},
 		{"auth/login", string(raw), "https://example.test/", 403},
 		{"auth/login", `{"password":"fixture-password-long","password":"fixture-password-long"}`, "https://example.test", 400},
-		{"auth/login", `{"username":"admin","password":"fixture-password-long"}`, "https://example.test", 400},
+		{"auth/login", `{"unrecognized":"admin","password":"fixture-password-long"}`, "https://example.test", 400},
 		{"auth/login?password=fixture", string(raw), "https://example.test", 400},
 	} {
 		if w := authRequest(t, s, "POST", tc.path, tc.raw, tc.origin, ""); w.Code != tc.code {
@@ -83,7 +83,7 @@ func TestPasswordLoginCookieAndStrictOriginCSRFContract(t *testing.T) {
 		t.Fatal("administrator cookie was not scoped, secure, HTTP-only and independent of CSRF")
 	}
 	w = authRequest(t, s, "GET", "auth/session", "", "", "", cookie)
-	if w.Code != 200 || strings.Contains(w.Body.String(), password) || strings.Contains(w.Body.String(), cookie.Value) || strings.Contains(w.Body.String(), "username") {
+	if w.Code != 200 || strings.Contains(w.Body.String(), password) || strings.Contains(w.Body.String(), cookie.Value) || !strings.Contains(w.Body.String(), `"username":"admin"`) {
 		t.Fatal("session did not restore safely")
 	}
 	if w := authRequest(t, s, "GET", "state", "", "https://attacker.example", "", cookie); w.Code != 403 {

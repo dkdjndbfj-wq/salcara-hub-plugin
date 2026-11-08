@@ -29,6 +29,9 @@ type persistedState struct {
 	Version  int                          `json:"version"`
 	Accounts map[string][]persistedDevice `json:"accounts"`
 	Audit    []AdminAudit                 `json:"adminAudit,omitempty"`
+	// Captured under the same lock as Accounts, excluded from the disk format.
+	// Only a successful write of this snapshot may acknowledge this epoch.
+	pairRevocationEpoch uint64
 }
 
 // loadDevices reads devices.json into h.accounts. A missing file is fine.
@@ -144,7 +147,12 @@ func (h *Hub) saver() {
 func (h *Hub) snapshot() persistedState {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	st := persistedState{Version: 2, Accounts: map[string][]persistedDevice{}, Audit: append([]AdminAudit(nil), h.adminAudit...)}
+	return h.snapshotLocked()
+}
+
+// snapshotLocked captures all durable state. Caller holds h.mu.
+func (h *Hub) snapshotLocked() persistedState {
+	st := persistedState{Version: 2, Accounts: map[string][]persistedDevice{}, Audit: append([]AdminAudit(nil), h.adminAudit...), pairRevocationEpoch: h.pairRevocationEpoch}
 	for id, a := range h.accounts {
 		if len(a.devices) == 0 {
 			continue
@@ -178,13 +186,24 @@ func (h *Hub) saveNow() {
 func (h *Hub) saveNowError() error {
 	h.saveMu.Lock()
 	defer h.saveMu.Unlock()
+	return h.saveSnapshotError(h.snapshot())
+}
+
+// Caller holds saveMu. Storage I/O never holds mu; a newer concurrent revoke
+// remains pending even when this earlier snapshot commits successfully.
+func (h *Hub) saveSnapshotError(snapshot persistedState) error {
 	// Compact serialization avoids indentation amplifying nested raw metadata.
-	b, err := json.Marshal(h.snapshot())
+	b, err := json.Marshal(snapshot)
 	if err == nil && len(b) > maxDevicesFileBytes {
 		return errors.New("devices.json would exceed the persistent metadata file limit")
 	}
 	if err == nil {
 		err = writeFileAtomic(filepath.Join(h.cfg.DataDir, devicesFile), b, 0o600)
+	}
+	if err == nil {
+		h.mu.Lock()
+		h.savedPairRevocationEpoch = max(h.savedPairRevocationEpoch, snapshot.pairRevocationEpoch)
+		h.mu.Unlock()
 	}
 	return err
 }

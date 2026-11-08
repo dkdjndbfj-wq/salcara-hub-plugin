@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -16,6 +17,12 @@ func deviceAccount(id string) string {
 	return "device:" + hex.EncodeToString(hash[:])
 }
 
+// Independently enrolled devices own exactly one device ID. Legacy API-key
+// accounts may own multiple computers, subject to their existing quota.
+func accountAllowsDevice(accountID, deviceID string) bool {
+	return !strings.HasPrefix(accountID, "device:") || accountID == deviceAccount(deviceID)
+}
+
 func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ string) {
 	ip := clientIP(r, h.cfg.TrustProxy)
 	var info Device
@@ -28,6 +35,12 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		writeError(w, 400, "设备编号无效")
 		return
 	}
+	info, _, metadataErr := prepareDeviceMetadata(info)
+	if metadataErr != nil {
+		h.limiter.fail(ip)
+		writeError(w, http.StatusBadRequest, "设备元数据无效或超出限制")
+		return
+	}
 	secretHash, secretOK := deviceSecret(r)
 	if !secretOK {
 		h.limiter.fail(ip)
@@ -35,6 +48,69 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		return
 	}
 	accountID := deviceAccount(info.DeviceID)
+	if invite := strings.TrimSpace(r.Header.Get("X-Salcara-Bot-Invite")); invite != "" {
+		p := BotBindingPackage{Type: botBindingType, Version: botBindingVersion, HubURL: h.cfg.PublicURL, GroupID: strings.TrimSpace(r.Header.Get("X-Salcara-Bot-Group")), Invite: invite, Signature: strings.TrimSpace(r.Header.Get("X-Salcara-Bot-Signature"))}
+		if h.cfg.DeploymentMode != "bot" || !validBotPackage(p) {
+			h.limiter.fail(ip)
+			writeError(w, 403, "Bot 绑定包无效")
+			return
+		}
+		h.mu.Lock()
+		g := h.botGroupForPackageLocked(p)
+		if g == nil || !g.Computers[info.DeviceID] && len(g.Computers) >= maxBotComputers {
+			h.mu.Unlock()
+			writeError(w, 403, "Bot 绑定包无效或设备上限已满")
+			return
+		}
+		st, status, deferred := h.registerDeviceLocked(accountID, info, secretHash)
+		if status == 0 {
+			g.Computers[info.DeviceID] = true
+		}
+		h.mu.Unlock()
+		if status != 0 {
+			writeError(w, status, "电脑登记失败")
+			return
+		}
+		if err := h.saveNowError(); err != nil {
+			writeError(w, 503, "电脑登记尚未安全保存，请稍后重试")
+			return
+		}
+		if err := h.saveBotStateError(); err != nil {
+			writeError(w, 503, "Bot 绑定尚未安全保存，请稍后重试")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st, "metadataDeferred": deferred, "groupId": g.ID, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(accountID, info.DeviceID)})
+		return
+	}
+	if h.cfg.DeploymentMode == "bot" {
+		h.mu.Lock()
+		a := h.accounts[accountID]
+		var existing *device
+		if a != nil {
+			existing = a.devices[info.DeviceID]
+		}
+		if existing == nil || !matchesDeviceSecret(existing, r) || existing.banned {
+			h.mu.Unlock()
+			h.limiter.fail(ip)
+			writeError(w, http.StatusForbidden, "Bot 首次登记需要 Salcara Hub 签发的绑定包")
+			return
+		}
+		st, status, deferred := h.registerDeviceLocked(accountID, info, secretHash)
+		h.mu.Unlock()
+		if status != 0 {
+			writeError(w, status, "电脑身份验证失败或本站设备容量已满")
+			return
+		}
+		if deferred {
+			writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st, "metadataDeferred": true, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(accountID, info.DeviceID)})
+			return
+		}
+		h.markDirty()
+		writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(accountID, info.DeviceID)})
+		return
+	}
+	h.enrollmentMu.Lock()
+	defer h.enrollmentMu.Unlock()
 	h.mu.Lock()
 	a := h.accounts[accountID]
 	exists := a != nil && a.devices[info.DeviceID] != nil
@@ -51,13 +127,38 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		writeError(w, 403, "设备身份验证失败")
 		return
 	}
-	if !exists && (len(h.accounts) >= maxDeviceAccounts || h.enrollLimiter.blocked(ip)) {
+	if !exists && h.enrollLimiter.blocked(ip) {
 		h.mu.Unlock()
 		writeError(w, 429, "设备登记过于频繁或达到本站容量限制，请稍后重试")
 		return
 	}
 	if !exists {
+		claimHash, claimOK := enrollmentClaimHash(r.Header.Get("X-Salcara-Enrollment-Claim"))
+		if !claimOK || !h.enrollmentClaimValidLocked(claimHash) {
+			h.mu.Unlock()
+			h.limiter.fail(ip)
+			writeError(w, http.StatusForbidden, "首次登记需要有效的一次性设备登记码")
+			return
+		}
+		if status := h.preflightNewDeviceLocked(accountID, info); status != 0 {
+			h.mu.Unlock()
+			writeError(w, status, "本站设备容量已满或设备身份不可用")
+			return
+		}
+		userID := h.enrollmentOwners[claimHash]
 		h.enrollLimiter.fail(ip)
+		h.mu.Unlock()
+		if err := h.consumeEnrollmentClaim(claimHash); err != nil {
+			h.log.Error("device enrollment claim persistence failed", "err", err)
+			writeError(w, http.StatusServiceUnavailable, "登记码无法安全提交，请稍后重试")
+			return
+		}
+		h.mu.Lock()
+		if err := h.assignEnrolledUserLocked(info.DeviceID, userID); err != nil {
+			h.mu.Unlock()
+			writeError(w, 503, "用户归属无法保存或用户已停用，请联系管理员")
+			return
+		}
 	}
 	// Commit the first secret under the same lock as the existence check. An
 	// empty reservation followed by a second handler permits enrollment races.
@@ -67,14 +168,21 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		writeError(w, status, "电脑身份验证失败或本站设备容量已满")
 		return
 	}
+	if !exists && h.cfg.DataDir != "" {
+		if err := h.saveNowError(); err != nil {
+			h.log.Error("new device registration persistence failed", "err", err)
+			writeError(w, http.StatusServiceUnavailable, "设备登记尚未安全保存，请稍后重试")
+			return
+		}
+	}
 	if deferred {
 		h.log.Warn("device metadata update deferred: site metadata budget full", "account", accountID, "deviceId", info.DeviceID)
-		writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st, "metadataDeferred": true})
+		writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st, "metadataDeferred": true, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(accountID, info.DeviceID)})
 		return
 	}
 	h.markDirty()
 	h.log.Info("device registered", "account", accountID, "deviceId", info.DeviceID)
-	writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st})
+	writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(accountID, info.DeviceID)})
 }
 
 func validDeviceInfo(info Device) bool {
@@ -84,7 +192,12 @@ func validDeviceInfo(info Device) bool {
 // registerDeviceLocked is shared by legacy and device-only enrollment. Caller
 // holds h.mu. Authentication and capacity checks never create orphan accounts.
 func (h *Hub) registerDeviceLocked(acct string, info Device, secretHash [32]byte) (DeviceStatus, int, bool) {
-	if h.bannedDeviceIDs[info.DeviceID] {
+	// /bridge/register also accepts device credentials. They must not create
+	// siblings in that namespace and bypass /device/register admission limits.
+	if !accountAllowsDevice(acct, info.DeviceID) {
+		return DeviceStatus{}, http.StatusForbidden, false
+	}
+	if h.bannedDeviceIDs[info.DeviceID] || h.userDisabledLocked(info.DeviceID) {
 		return DeviceStatus{}, 403, false
 	}
 	a := h.accounts[acct]
@@ -149,6 +262,14 @@ func (h *Hub) registerDeviceLocked(acct string, info Device, secretHash [32]byte
 }
 
 func (h *Hub) deviceOnlyAuth(w http.ResponseWriter, r *http.Request, path, ip string) (string, bool) {
+	if strings.HasPrefix(path, "/bot/") || strings.HasPrefix(path, "/app/") {
+		h.mu.Lock()
+		if g := h.botGroupForTokenLocked(r); g != nil {
+			h.mu.Unlock()
+			return "bot:" + g.ID, true
+		}
+		h.mu.Unlock()
+	}
 	// Valid credentials are checked first: failures by someone else behind the
 	// same proxy address must never lock out paired phones and computers.
 	if strings.HasPrefix(path, "/bridge/") {
@@ -156,7 +277,7 @@ func (h *Hub) deviceOnlyAuth(w http.ResponseWriter, r *http.Request, path, ip st
 		accountID := deviceAccount(id)
 		h.mu.Lock()
 		a := h.accounts[accountID]
-		valid := validID(id) && a != nil && a.devices[id] != nil && !a.devices[id].banned && matchesDeviceSecret(a.devices[id], r)
+		valid := validID(id) && a != nil && a.devices[id] != nil && !a.devices[id].banned && !h.userDisabledLocked(id) && matchesDeviceSecret(a.devices[id], r)
 		h.mu.Unlock()
 		if valid {
 			return accountID, true
@@ -167,12 +288,20 @@ func (h *Hub) deviceOnlyAuth(w http.ResponseWriter, r *http.Request, path, ip st
 		h.mu.Lock()
 		if hash, ok := pairTokenHash(r); ok {
 			identity, found := h.pairTokens[hash]
+			if found && h.managedPairUserDisabledLocked(identity.accountID, r) {
+				h.mu.Unlock()
+				writeManagedUserDisabled(w)
+				return "", false
+			}
 			if found && h.pairedDeviceLocked(identity.accountID, r) != nil {
 				h.mu.Unlock()
 				return identity.accountID, true
 			}
 		}
 		h.mu.Unlock()
+		if h.rejectUnpersistedPairRevocation(w, path == "/app/pair/revoke") {
+			return "", false
+		}
 	}
 	if h.limiter.blocked(ip) {
 		writeError(w, 429, "身份验证失败次数过多")
@@ -251,10 +380,15 @@ func (h *Hub) handleQRPair(w http.ResponseWriter, r *http.Request, _ string) {
 				h.deletePairAttemptLocked(key)
 			} else if a := h.accounts[parts[0]]; a != nil {
 				matched = a.devices[in.DeviceID]
-				if matched != nil && matched.conn != nil && !matched.banned {
+				if matched != nil && matched.conn != nil && !matched.banned && !h.userDisabledLocked(matched.info.DeviceID) && accountAllowsDevice(parts[0], matched.info.DeviceID) {
 					bindingID = attempt.bindingID
 					computerID = attempt.computerID
 					attemptID = attempt.attemptID
+					if attempt.pairSeed != "" {
+						mac := hmac.New(sha256.New, []byte(attempt.pairSeed))
+						_, _ = mac.Write([]byte(phoneHash))
+						token = hex.EncodeToString(mac.Sum(nil))
+					}
 					accountID = parts[0]
 					h.deletePairAttemptLocked(key) // atomic, single-use claim
 				}
@@ -267,17 +401,22 @@ func (h *Hub) handleQRPair(w http.ResponseWriter, r *http.Request, _ string) {
 		writeError(w, 403, "二维码无效、已使用、已过期或电脑已离线")
 		return
 	}
-	h.setPairLocked(accountID, matched, sha256.Sum256([]byte(token)), true)
+	tokenHash := sha256.Sum256([]byte(token))
+	h.setPairLocked(accountID, matched, tokenHash, true)
+	matched.pairPending = h.cfg.DataDir != ""
 	matched.bindingID, matched.phoneHash = bindingID, phoneHash
 	matched.pairAttemptID = attemptID
+	revision := matched.pairRevision
 	for sub := range h.accounts[accountID].apps {
 		if sub.deviceID == in.DeviceID {
 			delete(h.accounts[accountID].apps, sub)
 			sub.close()
 		}
 	}
-	status := matched.status()
 	h.mu.Unlock()
-	h.markDirty()
+	status, persisted := h.finishPairIssuance(w, accountID, matched, tokenHash, revision)
+	if !persisted {
+		return
+	}
 	writeJSON(w, 200, map[string]any{"pair_token": token, "device": status, "computerId": computerID})
 }

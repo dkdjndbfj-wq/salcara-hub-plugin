@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,15 @@ func TestMain(m *testing.M) {
 		})}
 		go func() {
 			<-ctx.Done()
+			if dir := os.Getenv("SALCARA_LAUNCHER_TEST_DRAIN_DIR"); dir != "" {
+				_ = os.WriteFile(filepath.Join(dir, "draining"), []byte("draining"), 0600)
+				for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+					if _, err := os.Stat(filepath.Join(dir, "release")); err == nil {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
 			grace, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			server.Shutdown(grace)
@@ -52,7 +62,107 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if os.Getenv("SALCARA_LAUNCHER_TEST_SUPERVISOR") == "1" {
+		runLockSupervisorFixture()
+		os.Exit(2)
+	}
 	os.Exit(m.Run())
+}
+
+// This helper is deliberately killed while its child drains SIGTERM. It runs
+// only inside the test executable and uses a new, isolated data directory.
+func runLockSupervisorFixture() {
+	dir := os.Getenv("SALCARA_LAUNCHER_TEST_DRAIN_DIR")
+	lock, err := launcherLock(dir)
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	path, err := os.Executable()
+	if err != nil {
+		return
+	}
+	file, err := openRegular(path, maxBinaryBytes)
+	if err != nil {
+		return
+	}
+	digest, size, err := hashFile(file, maxBinaryBytes)
+	file.Close()
+	if err != nil {
+		return
+	}
+	_ = os.Setenv("SALCARA_LAUNCHER_TEST_CHILD", "1")
+	runner := &managedRunner{cfg: Config{DataDir: dir, Listen: os.Getenv("SALCARA_HUB_LISTEN")}, volumeLock: lock}
+	if err = runner.Start(context.Background(), release{Path: path, Version: "0.4.0", SHA256: digest, Size: size}); err != nil {
+		return
+	}
+	pid, _ := json.Marshal(runner.child.cmd.Process.Pid)
+	if err = os.WriteFile(filepath.Join(dir, "ready"), pid, 0600); err != nil {
+		_ = runner.Stop()
+		return
+	}
+	select {}
+}
+
+func TestKilledLauncherKeepsVolumeLockedUntilChildFinishes(t *testing.T) {
+	dir := t.TempDir()
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor := exec.Command(path)
+	supervisor.Env = append(os.Environ(), "SALCARA_LAUNCHER_TEST_SUPERVISOR=1", "SALCARA_LAUNCHER_TEST_DRAIN_DIR="+dir, "SALCARA_HUB_LISTEN="+freeListen(t))
+	supervisor.Stdout, supervisor.Stderr = os.Stdout, os.Stderr
+	if err = supervisor.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		_ = os.WriteFile(filepath.Join(dir, "release"), []byte("release"), 0600)
+		if !waited {
+			_ = supervisor.Process.Kill()
+			_ = supervisor.Wait()
+		}
+	})
+	waitFile := func(name string) []byte {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			if raw, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
+				return raw
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("fixture did not reach %s", name)
+		return nil
+	}
+	var childPID int
+	if err = json.Unmarshal(waitFile("ready"), &childPID); err != nil || childPID < 1 {
+		t.Fatal("invalid fixture child PID", err)
+	}
+	if err = supervisor.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = supervisor.Wait()
+	waited = true
+	waitFile("draining")
+	if err = syscall.Kill(childPID, 0); err != nil {
+		t.Fatal("fixture child exited before lock check", err)
+	}
+	if second, err := launcherLock(dir); err == nil {
+		second.Close()
+		t.Fatal("another launcher acquired the volume while the orphan Hub still drained writes")
+	}
+	if err = os.WriteFile(filepath.Join(dir, "release"), []byte("release"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if next, err := launcherLock(dir); err == nil {
+			next.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("volume lock did not release after the orphan Hub exited")
 }
 func testProcessRelease(t *testing.T) release {
 	t.Helper()
@@ -84,7 +194,13 @@ func freeListen(t *testing.T) string {
 func TestRunnerStartsVerifiedInodeAndWaitsBeforeReplacement(t *testing.T) {
 	t.Setenv("SALCARA_LAUNCHER_TEST_CHILD", "1")
 	r := testProcessRelease(t)
-	runner := &managedRunner{cfg: Config{DataDir: t.TempDir(), Listen: freeListen(t)}}
+	dir := t.TempDir()
+	lock, err := launcherLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	runner := &managedRunner{cfg: Config{DataDir: dir, Listen: freeListen(t)}, volumeLock: lock}
 	t.Cleanup(func() { runner.Stop() })
 	if err := runner.Start(context.Background(), r); err != nil {
 		t.Fatal(err)
@@ -94,6 +210,10 @@ func TestRunnerStartsVerifiedInodeAndWaitsBeforeReplacement(t *testing.T) {
 	}
 	if err := runner.Stop(); err != nil {
 		t.Fatal(err)
+	}
+	if second, err := launcherLock(dir); err == nil {
+		second.Close()
+		t.Fatal("normal replacement released the parent volume lock")
 	}
 	if err := runner.Start(context.Background(), r); err != nil {
 		t.Fatal("could not start after confirmed child exit", err)

@@ -15,14 +15,19 @@ import (
 )
 
 type Status struct {
-	Configured     bool   `json:"configured"`
-	CurrentVersion string `json:"current_version"`
-	LatestVersion  string `json:"latest_version,omitempty"`
-	Status         string `json:"status"`
-	SHA256         string `json:"sha256,omitempty"`
-	ReleaseNotes   string `json:"release_notes,omitempty"`
-	Message        string `json:"message"`
-	JobID          string `json:"job_id,omitempty"`
+	Configured           bool   `json:"configured"`
+	CurrentVersion       string `json:"current_version"`
+	LatestVersion        string `json:"latest_version,omitempty"`
+	Status               string `json:"status"`
+	SHA256               string `json:"sha256,omitempty"`
+	ReleaseNotes         string `json:"release_notes,omitempty"`
+	Message              string `json:"message"`
+	JobID                string `json:"job_id,omitempty"`
+	AutoCheck            bool   `json:"auto_check"`
+	Checking             bool   `json:"checking"`
+	CheckedAt            string `json:"checked_at,omitempty"`
+	NextCheckAt          string `json:"next_check_at,omitempty"`
+	CheckIntervalSeconds int64  `json:"check_interval_seconds,omitempty"`
 }
 type processRunner interface {
 	Start(context.Context, release) error
@@ -42,14 +47,22 @@ type manager struct {
 	status    Status
 	ready     bool
 	closed    bool
+	nextCheck time.Time
 }
 
 func newManager(ctx context.Context, cfg Config, s *store, state diskState, runner processRunner) *manager {
 	r, _ := s.resolve(state.Current)
-	m := &manager{ctx: ctx, cfg: cfg, store: s, state: state, runner: runner, client: updateClient(), key: fixedPublicKey(), status: Status{Configured: !cfg.Disabled, CurrentVersion: r.Version, Status: "current", Message: "正在使用已确认版本；仅点击检查时联网"}}
+	if cfg.CheckInterval <= 0 {
+		cfg.CheckInterval = defaultCheckInterval
+	}
+	m := &manager{ctx: ctx, cfg: cfg, store: s, state: state, runner: runner, client: updateClient(), key: fixedPublicKey(), status: Status{Configured: !cfg.Disabled, CurrentVersion: r.Version, Status: "current", Message: "正在使用已确认版本；启动后自动检查新版本", AutoCheck: !cfg.Disabled}}
 	if cfg.Disabled {
 		m.status.Status = "unavailable"
 		m.status.Message = "运营者已关闭应用更新"
+	} else {
+		m.nextCheck = time.Now()
+		m.status.NextCheckAt = m.nextCheck.UTC().Format(time.RFC3339)
+		m.status.CheckIntervalSeconds = int64(cfg.CheckInterval / time.Second)
 	}
 	if state.Job != nil {
 		m.status.JobID = state.Job.ID
@@ -86,12 +99,21 @@ func (m *manager) check() Status {
 	}
 	defer m.operation.Unlock()
 	s := m.snapshot()
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed || m.ctx.Err() != nil {
+		return s
+	}
 	if m.cfg.Disabled {
 		s.Status = "unavailable"
 		s.Message = "运营者已关闭应用更新"
 		m.setStatus(s)
 		return s
 	}
+	s.Checking = true
+	s.NextCheckAt = ""
+	m.setStatus(s)
 	f, _, err := m.fetchFeed(m.ctx)
 	if err != nil {
 		s.Status = "unavailable"
@@ -99,15 +121,14 @@ func (m *manager) check() Status {
 		s.SHA256 = ""
 		s.ReleaseNotes = ""
 		s.Message = err.Error()
-		m.setStatus(s)
-		return s
+		return m.completeCheck(s)
 	}
 	b, ok := f.Binaries[m.store.platform]
 	if !ok {
 		s.Status = "unavailable"
+		s.LatestVersion, s.SHA256, s.ReleaseNotes = "", "", ""
 		s.Message = "该平台不支持签名应用更新"
-		m.setStatus(s)
-		return s
+		return m.completeCheck(s)
 	}
 	s.LatestVersion, s.SHA256, s.ReleaseNotes = f.Version, b.SHA256, f.ReleaseNotes
 	if newer(f.Version, s.CurrentVersion) {
@@ -117,8 +138,60 @@ func (m *manager) check() Status {
 		s.Status = "current"
 		s.Message = "当前已确认版本不低于更新源；不会降级"
 	}
-	m.setStatus(s)
+	return m.completeCheck(s)
+}
+
+// completeCheck records attempts as well as successful checks. Network failures
+// retry on the same bounded schedule and never trigger an installation.
+func (m *manager) completeCheck(s Status) Status {
+	now := time.Now()
+	s.Checking = false
+	s.CheckedAt = now.UTC().Format(time.RFC3339)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextCheck = now.Add(m.cfg.CheckInterval)
+	if !m.closed && m.ctx.Err() == nil {
+		s.NextCheckAt = m.nextCheck.UTC().Format(time.RFC3339)
+	} else {
+		s.NextCheckAt = ""
+	}
+	m.status = s
 	return s
+}
+
+// runAutoChecks shares the operation lock with manual checks and installs. A
+// busy operation is retried later without interrupting it or spawning workers.
+// Run owns this loop and waits for it to finish after cancelling the context.
+func (m *manager) runAutoChecks() {
+	if m.cfg.Disabled {
+		return
+	}
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-timer.C:
+			m.mu.Lock()
+			next, closed := m.nextCheck, m.closed
+			m.mu.Unlock()
+			if closed || m.ctx.Err() != nil {
+				return
+			}
+			// A manual check can move the deadline after this timer was armed.
+			if !time.Now().Before(next) {
+				m.check()
+			}
+			m.mu.Lock()
+			delay := time.Until(m.nextCheck)
+			m.mu.Unlock()
+			if delay <= 0 {
+				delay = time.Minute
+			}
+			timer.Reset(delay)
+		}
+	}
 }
 
 type applyRequest struct {

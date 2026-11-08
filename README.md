@@ -14,8 +14,11 @@ Hub 不运行大模型，也不要求用户提交中转站账号或模型 API Ke
 - 查看设备连接状态，测量 Hub 与电脑的往返延迟，撤销绑定、断开或封禁设备。
 - 提供省资源、均衡、高负载三种运行模式，适配不同服务器条件。
 - 单个 Docker 容器部署，提供可视化管理控制台。
-- 管理密钥自动生成，可在控制台更换；遗失后可在服务器恢复，保留设备数据。
+- 初始管理员密码自动生成，可在控制台更改账号和密码；遗失后可在服务器恢复，保留设备数据。
 - 支持签名验证的 Hub 程序更新，与现有中转服务分别维护。
+- 0.5.3 新增运维中心：分角色协作、可查询导出的操作审计、健康与监控接口、离线加密备份和校验恢复，见 [运维与恢复](docs/OPERATIONS-AND-RECOVERY.zh.md)。
+- 0.5.3 支持全站分别开关本站 API、外站 API、反代账号和官方账号，按完整来源地址限制远程执行，见 [远程使用授权](docs/REMOTE-SOURCE-AUTHORIZATION.zh.md)。
+- 0.5.3 支持管理员账号登录、用户档案、按用户登记和关联电脑、禁用用户及单独来源授权，见 [用户与设备管理](docs/USER-MANAGEMENT.zh.md)。手机保持原扫码流程。
 
 远程会话、消息和 Agent 操作需要电脑在线，并以桌面端已安装、已授权的能力为准；仅部署 Hub 不会自动开放 Agent 未提供的原生桌面接口。
 
@@ -23,10 +26,10 @@ Hub 不运行大模型，也不要求用户提交中转站账号或模型 API Ke
 
 准备一台 Linux 主机、Docker Engine / Compose、自己控制的域名和 HTTPS 反向代理。支持的镜像平台为 `linux/amd64` 和 `linux/arm64`。
 
-使用正式版本源码，在本地审阅脚本后执行：
+以下安装示例以 0.5.3 为目标。执行前在 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 确认 `standalone-v0.5.3` 已正式发布且同版本镜像可拉取；源码或文档更新不代表发布完成。在本地审阅该版本脚本后执行：
 
 ```sh
-git clone --branch standalone-v0.5.2 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
+git clone --branch standalone-v0.5.3 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
 cd salcara-hub
 bash deploy/standalone/install.sh \
   --public-url https://relay.example.com/salcara-hub \
@@ -37,11 +40,13 @@ bash deploy/standalone/install.sh \
 
 完整的反代配置、手动安装、迁移和验收步骤见 [部署教程](docs/STANDALONE-DOCKER.zh.md)。也可以把 [Agent 部署指南](docs/AGENT-DEPLOY.zh.md) 交给你的编程 Agent，完成后让它提供实际 URL 和待验收项。
 
+协议升级时的最低桌面版本设置与旧客户端迁移顺序见 [桌面版本兼容性](docs/DESKTOP-COMPATIBILITY.zh.md)。
+
 ## 开始使用
 
 1. 完成 HTTPS 反代配置，打开 `https://你的域名/salcara-hub/admin/`。
-2. 在自己的安全终端或编辑器中读取安装输出指定的初始管理密钥文件，输入整行密钥进入控制台。没有用户名；不要把密钥放进 URL 或发给别人。
-3. 在 Salcara 桌面 App 中填写站点根地址，例如 `https://你的域名`，连接后生成配对二维码。
+2. 在自己的安全终端或编辑器中读取安装输出指定的初始管理密钥文件，以账号 `admin`、整行密钥作为密码登录。历史 0.5.2 页面只填密钥；升级后首次使用 `admin` 和原管理密钥。设置过账号和密码后使用新值。不要把密钥放进 URL 或发给别人。
+3. 在管理页先创建用户，再为该用户生成一次性电脑登记码。在配套 Salcara 桌面 App 中填写站点根地址，例如 `https://你的域名`，首次登记时填写登记码，连接后生成配对二维码。
 4. 用 Salcara 手机 App 扫码绑定，选择电脑和 Agent，加载会话或发起任务。
 
 模型 API 由桌面 App 配置，不需要填进 Hub 后台。普通用户绑定电脑也不需要管理员密钥。
@@ -52,12 +57,15 @@ bash deploy/standalone/install.sh \
 | --- | --- | --- |
 | 管理控制台 | `/salcara-hub/admin/` | 管理员 |
 | 连接说明 | `/salcara-hub/` | 普通用户 |
+| 用户状态页 | `/salcara-hub/status` | 公开，无需管理员登录 |
 
-将路径拼在你自己的 HTTPS 站点地址后。管理页面仍需密钥登录；菜单可见范围不能代替权限验证。
+将路径拼在你自己的 HTTPS 站点地址后。管理页面仍需独立登录；菜单可见范围不能代替权限验证。
 
 ## 更新与维护
 
-控制台的「检查更新 / 一键更新」只更新签名验证后的 Hub 程序。Docker 基础镜像和启动器通过 Compose 升级，不会更新或控制你的中转服务。所有升级、恢复和卸载都应先备份，保留原项目与数据卷。
+0.5.3 新增独立的「版本更新」页面。使用包含新版启动器的 Docker 镜像后，服务启动时自动检查新版本，默认每 6 小时再检查一次；左上角显示当前版本，发现签名新版后版本号变色，点击即可确认更新，也可在更新页面点击「一键更新」。页面显示当前版本、最新版本、最近检查和下次检查时间，也可随时手动检查。
+
+一键更新安装签名验证后的 Hub 程序，保留管理密钥、设备绑定和持久数据，重启后需要重新登录。Docker 基础镜像和启动器通过 Compose 升级；已有安装首次启用后台定时检查，需要切换到包含新启动器的已发布镜像。仓库代码不代表正式镜像已经发布。所有升级、恢复和卸载都应先备份，保留原项目与数据卷。检测周期与部署步骤见 [更新与资源](docs/STANDALONE-DOCKER.zh.md#更新与资源)。
 
 - [部署、升级、恢复密钥与卸载](docs/STANDALONE-DOCKER.zh.md)
 - [交给 Agent 部署](docs/AGENT-DEPLOY.zh.md)

@@ -10,17 +10,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
-	ControlSocket    = "/tmp/salcara-hub-control.sock"
-	ControlTokenFile = "/tmp/salcara-hub-control-token"
-	PublisherID      = "salcara-local-20260930"
-	Product          = "salcara-hub-standalone"
-	publicKeyBase64  = "+JTC35ZD2PEJ5TO5ZOQtQTm5BoKDKMH59D6beZbn+gc="
- defaultFeed      = "https://raw.githubusercontent.com/dkdjndbfj-wq/salcara-hub-plugin/main/updates/standalone-account.json"
-	maxFeedBytes     = 64 << 10
-	maxBinaryBytes   = 64 << 20
+	ControlSocket        = "/tmp/salcara-hub-control.sock"
+	ControlTokenFile     = "/tmp/salcara-hub-control-token"
+	PublisherID          = "salcara-local-20260930"
+	Product              = "salcara-hub-standalone"
+	publicKeyBase64      = "+JTC35ZD2PEJ5TO5ZOQtQTm5BoKDKMH59D6beZbn+gc="
+	defaultFeed          = "https://raw.githubusercontent.com/dkdjndbfj-wq/salcara-hub-plugin/main/updates/standalone-account.json"
+	defaultCheckInterval = 6 * time.Hour
+	maxFeedBytes         = 64 << 10
+	maxBinaryBytes       = 64 << 20
 )
 
 type Config struct {
@@ -28,6 +30,7 @@ type Config struct {
 	Listen           string
 	FeedURL          string
 	Disabled         bool
+	CheckInterval    time.Duration
 	BootstrapPath    string
 	BootstrapVersion string
 }
@@ -42,6 +45,11 @@ func ConfigFromEnv(getenv func(string) string, bootstrapVersion string) (Config,
 	}
 	if c.FeedURL == "" {
 		c.FeedURL = defaultFeed
+	}
+	var err error
+	c.CheckInterval, err = updateCheckInterval(getenv("SALCARA_HUB_UPDATE_CHECK_INTERVAL"))
+	if err != nil {
+		return Config{}, err
 	}
 	switch strings.ToLower(getenv("SALCARA_HUB_DISABLE_UPDATES")) {
 	case "", "0", "false":
@@ -63,6 +71,17 @@ func ConfigFromEnv(getenv func(string) string, bootstrapVersion string) (Config,
 		return Config{}, err
 	}
 	return c, nil
+}
+
+func updateCheckInterval(value string) (time.Duration, error) {
+	if value == "" {
+		return defaultCheckInterval, nil
+	}
+	interval, err := time.ParseDuration(value)
+	if err != nil || interval < 5*time.Minute || interval > 7*24*time.Hour {
+		return 0, errors.New("SALCARA_HUB_UPDATE_CHECK_INTERVAL must be a duration between 5m and 168h")
+	}
+	return interval, nil
 }
 
 func fixedPublicKey() ed25519.PublicKey {

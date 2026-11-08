@@ -294,6 +294,39 @@ func TestPersistedDeviceV1AndV2KeepValidCredentialsAndOpaqueMetadata(t *testing.
 	}
 }
 
+func TestEventSequenceEpochAdvancesAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	first := newDeviceHub(t, Config{DataDir: dir, ResourceMode: "economy"})
+	base := first.seqBase
+	if err := first.saveNowError(); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+	second := newDeviceHub(t, Config{DataDir: dir, ResourceMode: "economy"})
+	if second.seqBase <= base {
+		t.Fatalf("event sequence epoch did not advance across restart: first=%d second=%d", base, second.seqBase)
+	}
+	second.Close()
+}
+
+func TestInvalidEventSequenceReservationFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, eventSequenceFile)
+	if err := os.WriteFile(path, []byte("not-a-sequence"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := New(Config{DataDir: dir, ResourceMode: "economy"}); err == nil || h != nil {
+		if h != nil {
+			h.Close()
+		}
+		t.Fatal("invalid event sequence reservation was accepted")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "not-a-sequence" {
+		t.Fatal("failed sequence validation changed the operator file")
+	}
+}
+
 func TestInvalidSavedVersionNestedFieldsAndHashesFailClosedWithoutOverwrite(t *testing.T) {
 	wrap := func(record string) string { return `{"version":2,"accounts":{"account":[` + record + `]}}` }
 	for name, raw := range map[string]string{

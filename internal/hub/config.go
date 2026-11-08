@@ -35,16 +35,27 @@ const (
 
 // Config configures a Hub. Zero values are replaced by defaults in New.
 type Config struct {
+	DesktopMinimumVersion string
+	DesktopUpdateURL      string
+	// DeploymentMode selects the purpose of this Hub installation. Station is
+	// the compatibility default; bot only relays device traffic and never
+	// authenticates model API keys.
+	DeploymentMode string
 	// ResourceMode is optional; an empty value preserves legacy plugin count
 	// defaults. Standalone explicitly chooses economy or a saved mode.
 	ResourceMode string
+	// RemoteAccess is independent of resource limits and device pairing.
+	// Empty mode permits paired execution only within the station scope;
+	// restricted adds signed-source authorization and never falls back.
+	RemoteAccess RemoteAccessPolicy
 	// DisableLegacyAPIKey makes the standalone device-pairing service independent
 	// of Sub2API and rejects bearer-only model keys before any upstream request.
 	DisableLegacyAPIKey bool
 	// Sub2APIURL is the base URL of the relay, e.g. http://127.0.0.1:8080.
 	Sub2APIURL      string
 	AllowedGroupIDs []int64
-	// DataDir holds devices.json. Empty disables persistence.
+	// DataDir holds devices.json, command receipts and the numeric event-sequence
+	// reservation. Empty disables all durable identity/sequence persistence.
 	DataDir string
 	// Prefix is the public path prefix (default /salcara-hub). Un-prefixed
 	// /v1/... paths are always accepted as well.
@@ -56,7 +67,8 @@ type Config struct {
 	// the endpoint.
 	DownloadsDir string
 	// PublicURL, when set (e.g. https://relay.example.com/salcara-hub), is used for the install-script
-	// templates instead of guessing from Host / X-Forwarded-* headers.
+	// templates instead of guessing from Host / X-Forwarded-* headers. Removing
+	// the complete Prefix also supplies the default station API scope.
 	PublicURL string
 
 	// CleanupUnpairedDays / CleanupPairedDays remove offline, unbanned computers
@@ -64,13 +76,16 @@ type Config struct {
 	CleanupUnpairedDays int
 	CleanupPairedDays   int
 
-	CommandTimeout time.Duration // how long /app/commands waits for /bridge/reply (45s)
-	AuthTimeout    time.Duration // sub2api /v1/usage request timeout (5s)
-	ValidTTL       time.Duration // cache for valid keys (10m)
-	InvalidTTL     time.Duration // cache for invalid keys (1m)
-	PingInterval   time.Duration // SSE keep-alive comment interval (20s)
-	AuthFailLimit  int           // failed auth attempts per IP per AuthFailWindow (20)
-	AuthFailWindow time.Duration // (1m)
+	// CommandTimeout explicitly overrides all command waits. When omitted,
+	// ordinary commands wait 45s and workspace Git waits 95s for a 90s Bridge task.
+	CommandTimeout        time.Duration
+	commandTimeoutDefault bool
+	AuthTimeout           time.Duration // sub2api /v1/usage request timeout (5s)
+	ValidTTL              time.Duration // cache for valid keys (10m)
+	InvalidTTL            time.Duration // cache for invalid keys (1m)
+	PingInterval          time.Duration // SSE keep-alive comment interval (20s)
+	AuthFailLimit         int           // failed auth attempts per IP per AuthFailWindow (20)
+	AuthFailWindow        time.Duration // (1m)
 
 	// FCMCredentials is a Firebase service-account key (JSON). Empty disables push notifications.
 	FCMCredentials []byte
@@ -80,6 +95,9 @@ type Config struct {
 }
 
 func (c *Config) setDefaults() {
+	if strings.TrimSpace(c.DeploymentMode) == "" {
+		c.DeploymentMode = "station"
+	}
 	if !validCleanupDays(c.CleanupUnpairedDays) {
 		c.CleanupUnpairedDays = 0
 	}
@@ -97,6 +115,7 @@ func (c *Config) setDefaults() {
 	}
 	if c.CommandTimeout <= 0 {
 		c.CommandTimeout = defaultCmdTimeout
+		c.commandTimeoutDefault = true
 	}
 	if c.AuthTimeout <= 0 {
 		c.AuthTimeout = 5 * time.Second
@@ -123,3 +142,5 @@ func (c *Config) setDefaults() {
 		c.Logger = slog.Default()
 	}
 }
+
+func validDeploymentMode(mode string) bool { return mode == "station" || mode == "bot" }

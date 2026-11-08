@@ -23,11 +23,19 @@ services:
       # limits; without it every visitor shares one address and a few bad
       # guesses would lock everyone out.
       SALCARA_HUB_TRUST_PROXY: "true"
+      SALCARA_HUB_DESKTOP_MINIMUM_VERSION: "${SALCARA_HUB_DESKTOP_MINIMUM_VERSION:-}"
+      SALCARA_HUB_DESKTOP_UPDATE_URL: "${SALCARA_HUB_DESKTOP_UPDATE_URL:-https://github.com/dkdjndbfj-wq/salcara-desktop/releases/latest}"
+      SALCARA_HUB_NETWORK_CONTROL_URL: "${SALCARA_HUB_NETWORK_CONTROL_URL:-}"
+      SALCARA_HUB_NETWORK_CONTROL_TOKEN_FILE: "${SALCARA_HUB_NETWORK_CONTROL_TOKEN_FILE:-}"
       # Inactive computers are removed after this many days offline (0 = never).
       # Unpaired ones simply re-register; paired ones must be scanned again.
       # The admin page can change both later; its saved choice wins.
       SALCARA_HUB_CLEANUP_UNPAIRED_DAYS: "7"
       SALCARA_HUB_CLEANUP_PAIRED_DAYS: "0"
+      # Check for signed releases at startup and every 6 hours; installation
+      # still requires the administrator's confirmation in Version updates.
+      SALCARA_HUB_DISABLE_UPDATES: "${SALCARA_HUB_DISABLE_UPDATES:-false}"
+      SALCARA_HUB_UPDATE_CHECK_INTERVAL: "${SALCARA_HUB_UPDATE_CHECK_INTERVAL:-6h}"
       # Push notifications to paired phones when the app is closed (Firebase Cloud Messaging).
       # Put the Firebase service-account key at ./secrets/fcm-service-account.json, readable only by
       # the Hub's user: `sudo chown 65532:65532 secrets/fcm-service-account.json && sudo chmod 600 secrets/fcm-service-account.json`,
@@ -39,6 +47,9 @@ services:
       GOMAXPROCS: "2"
     volumes:
       - hub-data:/data
+      # Optional edge management: set both NETWORK_CONTROL variables and mount
+      # the independent private token. Never use the browser administrator key.
+      # - ./secrets/edge-control-token:/run/secrets/edge-control-token:ro
       # - ./secrets/fcm-service-account.json:/run/secrets/fcm-service-account.json:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777

@@ -23,9 +23,10 @@ type managedChild struct {
 	done chan struct{}
 }
 type managedRunner struct {
-	cfg   Config
-	mu    sync.Mutex
-	child *managedChild
+	cfg        Config
+	volumeLock *os.File
+	mu         sync.Mutex
+	child      *managedChild
 }
 
 func (p *managedRunner) Start(ctx context.Context, r release) error {
@@ -51,6 +52,13 @@ func (p *managedRunner) Start(ctx context.Context, r release) error {
 	cmd := exec.Command("/proc/self/fd/3")
 	cmd.Args[0] = r.Path
 	cmd.ExtraFiles = []*os.File{file}
+	if p.volumeLock != nil {
+		// Keep the same flock open in the child (FD 4). If the launcher dies,
+		// Pdeathsig only begins the Hub's graceful shutdown; another launcher
+		// must not acquire the volume until that last writer actually exits.
+		// The parent keeps its own descriptor across normal replacements.
+		cmd.ExtraFiles = append(cmd.ExtraFiles, p.volumeLock)
+	}
 	cmd.Env = childEnvironment(os.Environ(), p.cfg)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}

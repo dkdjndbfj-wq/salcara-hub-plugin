@@ -1,6 +1,6 @@
 # 给 Agent 的独立 Hub 部署指南
 
-只部署 Salcara Hub，不修改桌面/手机 UI，不操作用户模型 Key，不把 CLI 验收说成原生桌面能力验收。遵循用户授权；不得把服务器密码、管理密钥、设备秘密、原站 JWT、私钥或真实配置提交 GitHub、写入公开报告或发到聊天。
+只部署 Salcara Hub，不修改桌面/手机 UI，不操作用户模型 Key，不把 CLI 验收说成原生桌面能力验收。Bot 是电脑与手机之间的中继，Codex、Claude CLI 和其他 Agent 仍运行在用户电脑。遵循用户授权；不得把服务器密码、管理密钥、设备秘密、原站 JWT、私钥或真实配置提交 GitHub、写入公开报告或发到聊天。Bot 模式验收成功后，将受限绑定 JSON 交付给用户；该包最多可登记 8 台电脑和 1 部手机。绝不输出管理密钥。
 
 ## 部署前只读检查
 
@@ -11,28 +11,40 @@
 
 ## 首次部署
 
-取得正式 `standalone-v0.5.2` 源码并审阅 `deploy/standalone/install.sh`，在目标 Linux 主机运行：
+Bot 任务必须显式选 `bot`，不可沿用默认 Station 模式。取得正式 Hub 源码并审阅 `deploy/standalone/install.sh`，然后在**具备公开 HTTPS 与 Docker/Compose 的目标 Linux 主机**运行：
 
 ```sh
 bash deploy/standalone/install.sh \
+  --mode bot \
   --public-url https://relay.example.com/salcara-hub \
-  --install-dir /opt/salcara-hub
+  --install-dir /opt/salcara-hub-bot
 ```
 
-必须把占位域名换成用户指定并控制的实际域名。只使用固定正式 0.5.2 镜像；Release 或镜像不可达就停止，不能输出“已经部署完成”。脚本不修改 Nginx、不安装/重启 Docker、不控制远程 Docker，也不会将初始管理密钥打印出来。
+必须把占位域名换成用户指定并控制的实际域名。默认使用包含 Bot 协议的正式 `0.5.3` 镜像，不可回退到 Station `0.5.2`。如果镜像暂不可用，只有在已审阅的 Bot 源码提交完整、工作树干净且目标主机可构建 Docker 镜像时，才显式加 `--source-build`；构建会从 Git 提交归档取源码，并在初始化前运行 Dockerfile 中的全量测试、`vet` 和竞态测试。脚本不修改 Nginx、不安装/重启 Docker、不控制远程 Docker，也不会将初始管理密钥打印出来。
 
-脚本健康检查成功后，仍要完成反代步骤：
+Bot 安装器会验证本地 Hub、公开 HTTPS `/v1/ping`、Bridge SSE 与 App 长轮询，并通过管理 API 创建和保存 `bot-binding.json`。所有检查成功才输出绑定包。可以先配置反代再安装；也可以先运行安装器启动 Hub，再完成以下反代步骤并运行续跑命令。镜像获取和源码构建失败都发生在创建部署目录及初始化数据之前；首次初始化未确认成功时不会给出续跑命令：
 
 - 备份准确站点配置到新建、权限受限的目录，合并两个 Hub location；禁止覆盖整个文件。
 - 宿主机 Nginx 使用回环 upstream；容器 Nginx 使用专用私有网络及持久化网络别名，不使用该容器自己的 localhost，不公开 8787。
+- 反代要正确支持长连接、`proxy_buffering off`、足够的读超时，以及 `/salcara-hub` 前缀；只对实际部署的主机地址做公网验证。
 - 保留 `access_log off`，检查 CDN/WAF 的完整 URL 日志。CDN real IP 只信任明确范围，覆盖而不是追加 `X-Forwarded-For`。
 - 在准确代理内先测试配置，成功后只 reload 代理。失败就恢复此次修改，不重启 Docker、Sub2API 或整台服务器。
 
 不要在未授权时直接改 Sub2API 数据库添加菜单。给用户 URL，让用户从自定义 iframe 设置中添加。
 
+### Bot 失败续跑
+
+安装器若在初始化后遇到公网反代暂不可用，会保留安装目录和数据卷，并打印只续跑命令。先修复反代，再在同一台 Linux 主机运行：
+
+```sh
+bash /opt/salcara-hub-bot/resume-bot.sh --install-dir /opt/salcara-hub-bot
+```
+
+该命令只验证并启动原 Bot 容器，不运行 `-init`、不新建/删除卷、不停止其他服务。源码构建模式会优先检查本地镜像 ID，必要时从权限受限的镜像归档恢复；不会悄悄改拉 Registry 镜像。绑定 JSON 已存在时直接复用；否则从受限管理密钥文件申请新包。若密钥已由用户更换，则停止自动签发，让用户登录管理页生成绑定包。若 AI 云电脑平台不提供公开 HTTPS 入站服务，或无法正确代理 SSE/长轮询，应报告环境不支持 Bot 部署，不安装 VPN/隧道，也不要声称已完成。
+
 ## 必须验收并记录
 
-- 运行的是正式镜像，Hub 版本 0.5.2，非 root、只读、仅回环发布端口，无 Docker socket。
+- 运行的是正式 Bot 镜像，或记录了源码提交和本地镜像 ID 的源码构建镜像；Hub 版本 0.5.3，非 root、只读、仅回环发布端口，无 Docker socket。
 - 本地 health 正常、公网说明和管理页可达，query 303 清除，同源 iframe 安全头正确；未登录管理 API 返回 401。
 - 原 Sub2API 页面和只读健康未受影响；不发送付费模型请求当健康检查。
 - 管理页管理密钥登录/更换管理密钥由用户自行输入秘密验收；不要将管理密钥读取到工具输出或要求用户发管理密钥。未做这一步就列为待用户验收。
@@ -50,7 +62,7 @@ Hub 容器 / HTTPS：已验收（或说明未完成项）
 自定义 iframe「远程使用说明」URL：https://relay.example.com/salcara-hub/（普通用户可见）
 初始管理密钥文件：/opt/salcara-hub/secrets/admin-initial-login.txt（由用户自己安全读取，勿公开）
 文件里只有管理密钥一行，直接复制整行到管理页；首次登录后更换管理密钥，再删除本地初始文件副本。
-电脑端站点地址：https://relay.example.com；电脑生成二维码，手机扫码绑定。
+电脑端站点地址：https://relay.example.com；Bot 部署时电脑和手机都导入同一份绑定 JSON。
 待验收：用户登录/更换管理密钥、真实手机绑定和原生桌面续聊（按实际情况填写）。
 ```
 

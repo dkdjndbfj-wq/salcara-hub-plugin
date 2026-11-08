@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer">
+  <title>Salcara Hub · 连接监测</title>
+  <script src="./public-theme.js"></script>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml"><link rel="stylesheet" href="./public.css">
+  <script src="./public-sources.js" defer></script><script src="./status.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+<header class="site-header shell">
+  <a class="brand" href="./" aria-label="Salcara Hub 首页"><img src="./icon.svg" alt="" width="34" height="34"><span>Salcara <span class="brand-suffix">Hub</span></span><span class="brand-tag">CONNECT</span></a>
+  <nav aria-label="主导航"><a href="./">连接总览</a><a href="./status" aria-current="page">服务状态<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></a></nav>
+  <label class="theme-control"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5"/></svg><select id="theme-mode" aria-label="配色模式"><option value="system">跟随系统</option><option value="light">亮色模式</option><option value="dark">暗色模式</option></select></label>
+  <span class="header-meta">PUBLIC CONSOLE <span aria-hidden="true">/</span> 01</span>
+</header>
+<main id="main" class="shell dashboard status-page">
+  <div class="board-heading"><div><p class="eyebrow">SALCARA NETWORK / LIVE STATUS</p><h1>连接监测<span class="title-line" aria-hidden="true"></span></h1></div><div class="board-meta"><span class="view-scope">当前浏览器 <span aria-hidden="true">→</span> 本站 HUB</span><p class="client-version-summary" aria-label="本次配套客户端版本"><span>手机 <b data-client-version="mobile">v{{MOBILE_CLIENT_VERSION}}</b></span><span>Bridge <b data-client-version="bridge">v{{BRIDGE_CLIENT_VERSION}}</b></span></p></div></div>
+  <section class="panel status-overview" aria-labelledby="status-heading" aria-describedby="status-scope">
+    <div class="status-overview-top"><div id="status-visual" class="status-visual" aria-hidden="true"><svg class="icon status-glyph-ok" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg><svg class="icon status-glyph-other" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v6m0 4h.01"/></svg></div><div class="status-heading-group"><h2 id="status-heading">HUB SERVICE</h2><p id="health" class="pill">等待检测</p><p id="summary" class="status-summary" role="status">正在准备连接检测。</p></div></div>
+    <dl class="status-metrics"><div><dt>本次 GET 请求耗时</dt><dd id="request-duration">—</dd></div><div><dt>最近检测</dt><dd><time id="checked-at">尚未检测</time></dd></div><div><dt>最近成功</dt><dd><time id="last-success">尚无成功记录</time></dd></div></dl>
+    <div class="status-controls"><label class="status-auto-toggle"><input id="auto-check" type="checkbox" role="switch" checked><span>自动检测</span><span class="interval-label">30 秒</span></label><p id="refresh-state">页面在后台或浏览器离线时暂停。</p><button id="check" type="button" class="button secondary">立即检测</button></div>
+  </section>
+  <section class="panel services-section" aria-labelledby="sources-heading" aria-describedby="sources-scope">
+  <div class="panel-heading"><div class="panel-title"><span class="section-index">02</span><h2 id="sources-heading">服务开放状态</h2><span class="panel-kicker">SOURCE ACCESS</span></div><div class="source-total"><strong id="source-enabled-count">—</strong><span>类开放</span></div></div>
+  <ul class="source-grid">
+    <li class="source-item"><div class="source-name"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="7" rx="2"/><rect x="4" y="14" width="16" height="7" rx="2"/><path d="M8 6.5h.01M8 17.5h.01"/></svg><h3>本站 API</h3></div><span id="source-api-status" class="source-badge muted">确认中</span><p id="source-api-detail" class="source-meta">正在读取本站设置</p></li>
+    <li class="source-item"><div class="source-name"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg><h3>外站 API</h3></div><span id="source-external_api-status" class="source-badge muted">确认中</span><p id="source-external_api-detail" class="source-meta">正在读取本站设置</p></li>
+    <li class="source-item"><div class="source-name"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4v5c0 5-8 9-8 9s-8-4-8-9V7l8-4Z"/><path d="m8 12 3 3 5-6"/></svg><h3>反代账号</h3></div><span id="source-reverse_proxy-status" class="source-badge muted">确认中</span><p id="source-reverse_proxy-detail" class="source-meta">正在读取本站设置</p></li>
+    <li class="source-item"><div class="source-name"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg><h3>官方账号</h3></div><span id="source-official_account-status" class="source-badge muted">确认中</span><p id="source-official_account-detail" class="source-meta">正在读取本站设置</p></li>
+  </ul>
+  <p id="sources-scope" class="sr-only">显示本站配置的开放和授权状态，不代表上游服务连通、具体账号在线或额度充足。</p>
+  <div class="panel-bottom"><span>POLICY SYNC</span><span id="sources-refresh" role="status">同步中</span></div>
+</section>
+  <div class="status-detail-grid">
+    <section class="panel trend-panel" aria-labelledby="trend-heading" aria-describedby="status-scope">
+      <div class="panel-heading"><div class="panel-title"><span class="section-index">03</span><h2 id="trend-heading">响应耗时</h2><span class="panel-kicker">RESPONSE TIME</span></div><span id="sample-count" class="count-label">0 / 12 次</span></div>
+      <div class="chart-meta"><span id="chart-scale">等待数据</span><span><i class="legend-dot" aria-hidden="true"></i>成功<i class="legend-dot failed" aria-hidden="true"></i>未成功</span></div>
+      <div class="chart-area"><ol id="request-chart" class="request-chart" aria-label="最近检测耗时，按时间从早到晚排列"></ol><p id="chart-empty" class="chart-empty">等待首次检测</p></div>
+      <div class="chart-caption"><span>较早</span><span>最近</span></div><p id="chart-summary" class="chart-summary">尚无检测记录</p>
+    </section>
+    <section class="panel history-panel" aria-labelledby="history-heading"><div class="panel-heading"><div class="panel-title"><h2 id="history-heading">检测记录</h2><span class="panel-kicker">CHECK LOG</span></div><span class="count-label">最近 12 次</span></div><ol id="status-history" class="status-history" aria-label="检测记录，最新在前" tabindex="0"><li class="status-history-empty">尚无检测记录</li></ol></section>
+  </div>
+  <p id="status-scope" class="sr-only">此状态只表示 Hub 接口当前可响应，不代表电脑、Agent 或模型在线。耗时包括收到完整 GET 响应的网络与服务处理时间，不是手机到电脑的业务全链路延迟。检测记录仅保留本次访问最近 12 次，刷新清空，不是服务器历史。</p>
+  <noscript><p class="scope-note">请启用 JavaScript 后进行连接检测。</p></noscript>
+</main>
+<footer class="site-footer shell"><span>SALCARA HUB <span aria-hidden="true">/</span> CONNECTION CONSOLE</span><span class="footer-line" aria-hidden="true"></span><span>设备配对 · 任务接续</span></footer>
+</body>
+</html>

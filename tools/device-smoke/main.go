@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"time"
@@ -19,12 +20,19 @@ import (
 func main() {
 	listen := flag.String("listen", "127.0.0.1:47837", "loopback listen address; use :0 for an available port")
 	dataDir := flag.String("data-dir", "", "explicit fixture state directory; empty disables persistence")
+	publicURL := flag.String("public-url", "", "optional loopback station URL for synthetic API switching tests")
 	flag.Parse()
 	host, _, err := net.SplitHostPort(*listen)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		log.Fatal("listen must be an explicit loopback address")
 	}
-	service, err := hub.New(hub.Config{DataDir: *dataDir, TrustProxy: false})
+	if *publicURL != "" {
+		u, parseErr := url.Parse(*publicURL)
+		if parseErr != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() {
+			log.Fatal("public-url must be an explicit loopback HTTP station URL")
+		}
+	}
+	service, err := hub.New(hub.Config{DataDir: *dataDir, TrustProxy: false, PublicURL: *publicURL})
 	if err != nil {
 		log.Fatal(err)
 	}

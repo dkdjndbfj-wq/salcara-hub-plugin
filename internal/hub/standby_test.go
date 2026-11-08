@@ -13,11 +13,12 @@ import (
 
 func standbyFixture(t *testing.T) (*Hub, string, string, string) {
 	t.Helper()
-	h := newDeviceHub(t, Config{DataDir: t.TempDir(), CommandTimeout: 2 * time.Second})
+	h := newDeviceHub(t, Config{DataDir: t.TempDir(), RemoteAccess: RemoteAccessPolicy{Station: &StationPolicy{Version: 1, APIBases: []string{"https://example.com"}}}, CommandTimeout: 2 * time.Second})
 	id, secret, token := "standby-pc", strings.Repeat("ab", 32), strings.Repeat("cd", 32)
 	enrollDevice(t, h, id, secret)
 	h.mu.Lock()
 	dev := h.accounts[deviceAccount(id)].devices[id]
+	dev.info.Capabilities = []string{"station.guard.v1"}
 	h.setPairLocked(deviceAccount(id), dev, sha256.Sum256([]byte(token)), true)
 	dev.bindingID, dev.phoneHash = strings.Repeat("a", 64), strings.Repeat("b", 64)
 	h.mu.Unlock()

@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { assertPrivateArchive } from './private-archive.mjs';
 
 const image = process.argv[2] || 'salcara-hub-standalone:ci';
 const suffix = randomBytes(5).toString('hex');
@@ -15,6 +16,7 @@ const label = 'salcara.test=standalone';
 let madeContainer = false;
 let madeVolume = false;
 let tempDir;
+let bridgeStreamAbort;
 let password;
 let cookie;
 let csrf;
@@ -26,6 +28,16 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const env = ['-e', 'SALCARA_HUB_PUBLIC_URL=https://relay.example.com/salcara-hub',
   '-e', 'GOMEMLIMIT=32MiB', '-e', 'GOMAXPROCS=2'];
 const mount = ['--mount', `type=volume,src=${volume},dst=/data`];
+
+function copyPrivateFixture(destination) {
+  const source = `${container}:/data/admin-initial-login.txt`;
+  const archive = execFileSync('docker', ['cp', source, '-'], {
+    stdio: ['ignore', 'pipe', 'pipe'], timeout: 45000, maxBuffer: 64 * 1024,
+  });
+  assertPrivateArchive(archive, 'admin-initial-login.txt');
+  docker(['cp', source, destination]);
+  if (process.platform !== 'win32') assert.equal(statSync(destination).mode & 0o777, 0o600);
+}
 
 async function request(path, options = {}) {
   return fetch(`${base}${path}`, { ...options, signal: AbortSignal.timeout(5000) });
@@ -86,6 +98,12 @@ try {
   assert.equal(page.status, 200);
   assert.equal(page.headers.get('x-frame-options'), 'SAMEORIGIN');
   assert.match(page.headers.get('content-security-policy') || '', /frame-ancestors 'self'/);
+  const publicStatusPage = await request('/salcara-hub/status');
+  assert.equal(publicStatusPage.status, 200);
+  assert.match(await publicStatusPage.text(), /status\.js/);
+  const publicStatus = await request('/salcara-hub/statusz');
+  assert.equal(publicStatus.status, 200);
+  assert.deepEqual(await publicStatus.json(), { status: 'available' });
   const clean = await request('/salcara-hub/admin/?token=fake-sub2api-token&user_id=123', { redirect: 'manual' });
   assert.equal(clean.status, 303);
   assert.equal(clean.headers.get('location'), '/salcara-hub/admin/');
@@ -94,8 +112,7 @@ try {
   // Read ONLY the new isolated fixture password. Never print it or use an operator's file.
   tempDir = mkdtempSync(join(tmpdir(), 'salcara-hub-standalone-test-'));
   const testPasswordPath = join(tempDir, 'admin-initial-login.txt');
-  docker(['cp', `${container}:/data/admin-initial-login.txt`, testPasswordPath]);
-  assert.equal(statSync(testPasswordPath).mode & 0o777, 0o600);
+  copyPrivateFixture(testPasswordPath);
   password = readFileSync(testPasswordPath, 'utf8').trim();
   assert.match(password, /^[A-Za-z0-9_-]{43}$/);
   const origin = 'https://relay.example.com';
@@ -123,14 +140,79 @@ try {
   const stateResponse = await request('/salcara-hub/_admin/v1/state', { headers: adminHeaders });
   assert.equal(stateResponse.status, 200);
   const state = await stateResponse.json();
+  assert.equal(state.public_url, 'https://relay.example.com/salcara-hub');
   assert.equal(state.resource_mode, 'economy');
   assert.deepEqual(state.resource_modes.map(item => item.id).sort(), ['balanced', 'economy', 'performance']);
+  const fleetResponse = await request('/salcara-hub/_admin/v1/servers/state', { headers: adminHeaders });
+  assert.equal(fleetResponse.status, 200);
+  const fleet = await fleetResponse.json();
+  assert.deepEqual(fleet.artifacts, { amd64: true, arm64: true }, 'published image must contain both Edge deployment artifacts at the configured path');
+  assert.deepEqual(fleet.hosts, []);
+  assert.deepEqual(fleet.jobs, []);
+  assert.equal(fleet.active_id, '');
   const statusResponse = await request('/salcara-hub/_admin/v1/update/status', { headers: adminHeaders });
   assert.equal(statusResponse.status, 200);
   const updateStatus = await statusResponse.json();
   assert.equal(updateStatus.configured, true, 'same-container launcher must be configured');
   assert.equal(updateStatus.current_version, state.standalone_version);
   assert.equal(updateStatus.current_version, config.Labels['org.opencontainers.image.version']);
+
+  const enrollmentResponse = await request('/salcara-hub/_admin/v1/enrollment-claims', {
+    method: 'POST', headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: true }),
+  });
+  assert.equal(enrollmentResponse.status, 201, 'authenticated admin can issue a one-time computer enrollment claim');
+  const enrollment = await enrollmentResponse.json();
+  assert.match(enrollment.claim, /^[a-f0-9]{64}$/);
+  const deviceId = `smoke-pc-${suffix}`;
+  const deviceSecret = randomBytes(32).toString('hex');
+  const deviceHeaders = { 'X-Salcara-Device-Id': deviceId, 'X-Salcara-Device-Secret': deviceSecret };
+  const registration = await request('/salcara-hub/v1/device/register', {
+    method: 'POST', headers: { ...deviceHeaders, 'X-Salcara-Enrollment-Claim': enrollment.claim, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId, name: 'Isolated smoke computer', os: 'linux', version: 'smoke', projects: [], tools: [] }),
+  });
+  assert.equal(registration.status, 200, 'device-only registration does not need a model API key');
+
+  bridgeStreamAbort = new AbortController();
+  const stream = await fetch(`${base}/salcara-hub/v1/bridge/stream?deviceId=${encodeURIComponent(deviceId)}`, {
+    headers: deviceHeaders, signal: bridgeStreamAbort.signal,
+  });
+  assert.equal(stream.status, 200, 'registered Bridge can establish its direct Hub stream');
+  const streamPump = (async () => {
+    try {
+      const reader = stream.body.getReader();
+      while (!(await reader.read()).done) {}
+    } catch { /* the isolated test aborts this stream before container restart */ }
+  })();
+
+  const bindingId = randomBytes(32).toString('hex');
+  const pairStart = await request('/salcara-hub/v1/bridge/pair/start', {
+    method: 'POST', headers: { ...deviceHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId, bindingId, computerId: `smoke-${suffix}` }),
+  });
+  assert.equal(pairStart.status, 200, 'online Bridge can issue a single-use phone QR ticket');
+  const pairAttempt = await pairStart.json();
+  assert.match(pairAttempt.ticket, /^[a-f0-9]{64}$/);
+  const phoneId = randomBytes(32).toString('hex');
+  const phonePair = await request('/salcara-hub/v1/app/pair/qr', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId, ticket: pairAttempt.ticket, phoneId }),
+  });
+  assert.equal(phonePair.status, 200, 'phone can claim the QR ticket');
+  const phonePairResult = await phonePair.json();
+  assert.match(phonePairResult.pair_token, /^[a-f0-9]{64}$/);
+  const phoneDevices = await request('/salcara-hub/v1/app/devices', {
+    headers: { 'X-Salcara-Pair-Token': phonePairResult.pair_token },
+  });
+  assert.equal(phoneDevices.status, 200, 'paired phone can list its computer');
+  assert.ok((await phoneDevices.json()).devices.some(device => device.deviceId === deviceId));
+  const pairingStatus = await request('/salcara-hub/v1/bridge/pair/status', { headers: deviceHeaders });
+  assert.equal(pairingStatus.status, 200);
+  assert.equal((await pairingStatus.json()).paired, true);
+  bridgeStreamAbort.abort();
+  bridgeStreamAbort = undefined;
+  await streamPump;
+
   // Status does not fetch the public feed. Never apply a real
   // network update or use an operator publisher private key in this smoke.
   const changeMode = async (mode, confirm) => request('/salcara-hub/_admin/v1/resource-mode', {
@@ -190,8 +272,7 @@ try {
     await sleep(250);
   }
   const recoveredPath = join(tempDir, 'recovered-initial-login.txt');
-  docker(['cp', `${container}:/data/admin-initial-login.txt`, recoveredPath]);
-  assert.equal(statSync(recoveredPath).mode & 0o777, 0o600);
+  copyPrivateFixture(recoveredPath);
   recoveredPassword = readFileSync(recoveredPath, 'utf8').trim();
   assert.match(recoveredPassword, /^[A-Za-z0-9_-]{43}$/);
   assert.notEqual(recoveredPassword, newPassword);
@@ -208,8 +289,9 @@ try {
   assert.equal(logResult.status, 0, 'isolated test logs must be readable');
   assert.ok(![password, newPassword, recoveredPassword, cookie, csrf].some(secret => (logResult.stdout + logResult.stderr).includes(secret)),
     'passwords and session secrets must never appear in container logs');
-  console.log('Standalone container smoke passed: isolated management key login, secure cookie/CSRF, change/revocation, offline recovery, persistence, non-root/read-only launcher and update status.');
+  console.log('Standalone container smoke passed: direct device enrollment without a model API key, Bridge streaming, one-time phone QR pairing, secure admin cookie/CSRF, recovery, persistence and non-root/read-only runtime.');
 } finally {
+  bridgeStreamAbort?.abort();
   password = cookie = csrf = recoveredPassword = undefined;
   if (madeContainer) {
     const owned = docker(['inspect', '--format', '{{index .Config.Labels "salcara.test"}}', container]);
