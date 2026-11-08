@@ -1,9 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build Salcara Hub with checksum-verified modules, without operator secrets.
-FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS build
-ARG TARGETOS
-ARG TARGETARCH
-ARG VERSION=0.5.3-dev
+FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS verify
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -18,11 +15,18 @@ COPY cmd/salcara-edge ./cmd/salcara-edge
 ENV GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0
 RUN go test ./... && go vet ./...
 RUN CGO_ENABLED=1 go test -race ./...
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -buildid= -X salcara/hub/internal/standalone.Version=$VERSION" -o /out/salcara-hub ./cmd/hub
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -buildid= -X salcara/hub/internal/standalone.Version=$VERSION" -o /out/salcara-hub-launcher ./cmd/hub-launcher
 RUN GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -buildid=" -o /out/artifacts/salcara-edge-linux-amd64 ./cmd/salcara-edge
 RUN GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buildid=" -o /out/artifacts/salcara-edge-linux-arm64 ./cmd/salcara-edge
 RUN mkdir -p /runtime/data && chmod 0700 /runtime/data && chown 65532:65532 /runtime/data
+
+# Target arguments affect RUN cache keys even when the command does not use them.
+# Keep all native checks above this boundary so multiarch builds share one run.
+FROM verify AS build
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=0.5.3-dev
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -buildid= -X salcara/hub/internal/standalone.Version=$VERSION" -o /out/salcara-hub ./cmd/hub
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -buildid= -X salcara/hub/internal/standalone.Version=$VERSION" -o /out/salcara-hub-launcher ./cmd/hub-launcher
 
 FROM scratch AS binary-export
 COPY --from=build /out/salcara-hub /salcara-hub
