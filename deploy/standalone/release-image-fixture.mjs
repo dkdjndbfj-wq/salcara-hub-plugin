@@ -8,6 +8,7 @@ const digest = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex
 const indexType = 'application/vnd.oci.image.index.v1+json';
 const manifestType = 'application/vnd.oci.image.manifest.v1+json';
 const configType = 'application/vnd.oci.image.config.v1+json';
+const emptyConfigType = 'application/vnd.oci.empty.v1+json';
 
 export function fixtureTar(entries) {
   const parts = [];
@@ -47,7 +48,7 @@ export function createOCIFixture(root, options = {}) {
     const config = put({ architecture: arch, os: 'linux', config: {
       User: options.rootUser ? '0' : '65532:65532', Entrypoint: ['/salcara-hub-launcher'],
       Labels: { 'org.opencontainers.image.version': options.wrongVersion ? '0.5.2' : version, 'salcara.test': 'release-oci' },
-    }, rootfs: { type: 'layers', diff_ids: [digest(uncompressed)] } }, configType);
+    }, rootfs: { type: 'layers', diff_ids: [digest(uncompressed)] } }, options.runtimeConfigMediaType || configType);
     const runtime = put({ schemaVersion: 2, mediaType: manifestType, config, layers: [layer] }, manifestType, {
       platform: { os: 'linux', architecture: options.duplicateArch ? 'amd64' : arch },
     });
@@ -59,9 +60,16 @@ export function createOCIFixture(root, options = {}) {
       subject: options.noSubject ? [] : [{ name: '_', digest: { sha256: options.wrongSubject ? 'c'.repeat(64) : runtime.digest.slice(7) } }],
     },
       'application/vnd.in-toto+json', { annotations: { 'in-toto.io/predicate-type': options.badPredicate ? 'wrong' : type } }));
+    const attestationConfig = options.emptyAttestationConfig
+      ? put(Buffer.from(options.emptyConfigBytes ?? '{}'), emptyConfigType, options.emptyConfigDescriptor)
+      : put(options.legacyAttestationConfig || { architecture: 'unknown', os: 'unknown', rootfs: { type: 'layers', diff_ids: [] } }, configType);
+    const artifact = options.emptyAttestationConfig ? {
+      artifactType: 'application/vnd.docker.attestation.manifest.v1+json',
+      subject: { mediaType: manifestType, digest: runtime.digest, size: runtime.size, ...options.manifestSubject },
+    } : {};
     manifests.push(put({ schemaVersion: 2, mediaType: manifestType,
-      config: put({ architecture: 'unknown', os: 'unknown', rootfs: { type: 'layers', diff_ids: [] } }, configType), layers,
-    }, manifestType, { platform: { architecture: 'unknown', os: 'unknown' }, annotations: {
+      config: attestationConfig, layers, ...artifact,
+    }, manifestType, { platform: options.attestationPlatform || { architecture: 'unknown', os: 'unknown' }, annotations: {
       'vnd.docker.reference.type': 'attestation-manifest',
       'vnd.docker.reference.digest': options.unboundAttestation ? `sha256:${'b'.repeat(64)}` : runtime.digest,
     } }));

@@ -103,7 +103,17 @@ try {
   assert.match(await publicStatusPage.text(), /status\.js/);
   const publicStatus = await request('/salcara-hub/statusz');
   assert.equal(publicStatus.status, 200);
-  assert.deepEqual(await publicStatus.json(), { status: 'available' });
+  assert.match(publicStatus.headers.get('content-type') || '', /^application\/json(?:;|$)/);
+  assert.equal(publicStatus.headers.get('cache-control'), 'no-store');
+  assert.equal(publicStatus.headers.get('set-cookie'), null, 'anonymous status must not create an admin session');
+  // Exact fixture policy and public field allowlist: no addresses, accounts,
+  // credentials, device records or arbitrary extra fields may be exposed.
+  assert.deepEqual(await publicStatus.json(), { status: 'available', sources: [
+    { id: 'api', status: 'allowlist' },
+    { id: 'external_api', status: 'disabled' },
+    { id: 'reverse_proxy', status: 'allowlist' },
+    { id: 'official_account', status: 'disabled' },
+  ] });
   const clean = await request('/salcara-hub/admin/?token=fake-sub2api-token&user_id=123', { redirect: 'manual' });
   assert.equal(clean.status, 303);
   assert.equal(clean.headers.get('location'), '/salcara-hub/admin/');
@@ -116,16 +126,19 @@ try {
   password = readFileSync(testPasswordPath, 'utf8').trim();
   assert.match(password, /^[A-Za-z0-9_-]{43}$/);
   const origin = 'https://relay.example.com';
-  const login = async value => {
+  const login = async (value, username = 'admin') => {
     const result = await request('/salcara-hub/_admin/v1/auth/login', {
       method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: value }),
+      body: JSON.stringify({ username, password: value }),
     });
     assert.equal(result.status, 200);
     const header = result.headers.get('set-cookie');
     assert.match(header, /HttpOnly/i); assert.match(header, /Secure/i);
     assert.match(header, /SameSite=Strict/i); assert.match(header, /Path=\/salcara-hub\//i);
-    cookie = header.split(';')[0]; csrf = (await result.json()).csrf_token;
+    const session = await result.json();
+    assert.equal(session.role, 'owner');
+    assert.equal(session.username, username, 'login must return the authenticated administrator username');
+    cookie = header.split(';')[0]; csrf = session.csrf_token;
     assert.match(csrf, /^[A-Za-z0-9_-]{32,128}$/);
   };
   await login(password);
@@ -243,17 +256,25 @@ try {
   assert.equal((await changeMode('economy', true)).status, 200);
   const oldCookie = cookie;
   const newPassword = randomBytes(32).toString('base64url');
+  const newUsername = `smoke-owner-${suffix}`;
   const changed = await request('/salcara-hub/_admin/v1/auth/password', {
     method: 'POST', headers: { ...adminHeaders, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ current_password: password, new_password: newPassword }),
+    body: JSON.stringify({ current_password: password, new_password: newPassword, username: newUsername }),
   });
   assert.equal(changed.status, 200);
   assert.equal((await request('/salcara-hub/_admin/v1/state', { headers: { Cookie: oldCookie } })).status, 401);
   const rejected = await request('/salcara-hub/_admin/v1/auth/login', {
-    method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ password }),
+    method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ username: newUsername, password }),
   });
   assert.equal(rejected.status, 401, 'old password cannot log in after change');
-  await login(newPassword);
+  for (const username of ['', 'admin']) {
+    const wrongUsername = await request('/salcara-hub/_admin/v1/auth/login', {
+      method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password: newPassword }),
+    });
+    assert.equal(wrongUsername.status, 401, 'the new password alone must not bypass the changed administrator username');
+  }
+  await login(newPassword, newUsername);
   let initialFileRemoved = false;
   try { docker(['cp', `${container}:/data/admin-initial-login.txt`, join(tempDir, 'must-not-exist')]); }
   catch { initialFileRemoved = true; }
@@ -278,7 +299,7 @@ try {
   assert.notEqual(recoveredPassword, newPassword);
   assert.equal((await request('/salcara-hub/_admin/v1/state', { headers: { Cookie: cookie } })).status, 401);
   const obsoleteLogin = await request('/salcara-hub/_admin/v1/auth/login', {
-    method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: newPassword }),
+    method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ username: newUsername, password: newPassword }),
   });
   assert.equal(obsoleteLogin.status, 401, 'the previous key is revoked after offline recovery');
   await login(recoveredPassword);
@@ -289,7 +310,7 @@ try {
   assert.equal(logResult.status, 0, 'isolated test logs must be readable');
   assert.ok(![password, newPassword, recoveredPassword, cookie, csrf].some(secret => (logResult.stdout + logResult.stderr).includes(secret)),
     'passwords and session secrets must never appear in container logs');
-  console.log('Standalone container smoke passed: direct device enrollment without a model API key, Bridge streaming, one-time phone QR pairing, secure admin cookie/CSRF, recovery, persistence and non-root/read-only runtime.');
+  console.log('Standalone container smoke passed: strict anonymous public status, direct device enrollment without a model API key, Bridge streaming, one-time phone QR pairing, secure admin username/password and cookie/CSRF, recovery, persistence and non-root/read-only runtime.');
 } finally {
   bridgeStreamAbort?.abort();
   password = cookie = csrf = recoveredPassword = undefined;

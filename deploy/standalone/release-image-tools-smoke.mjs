@@ -36,7 +36,7 @@ export function cleanupToolsFixtures(images, root, run, removeRoot = directory =
 
 export async function runToolsSmoke(tool, buildkitFixture = false) {
 assert.match(tool || '', /^quay\.io\/skopeo\/stable(?::[a-zA-Z0-9._-]+|@sha256:[a-f0-9]{64})$/, 'pass the already-pulled official tool image');
-const run = args => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 45000 });
+const run = (args, timeout = 45000) => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout });
 const root = mkdtempSync(join(tmpdir(), 'salcara-oci-tools-smoke-'));
 const suffix = randomBytes(8).toString('hex');
 const images = [];
@@ -62,7 +62,7 @@ const skopeo = args => {
   }
 };
 try {
-  const fixture = createOCIFixture(root, { realTools: true });
+  const fixture = createOCIFixture(root, { realTools: true, emptyAttestationConfig: true });
   console.log(skopeo(['--version']).trim());
   const help = skopeo(['copy', '--help']);
   assert.match(help, /--all/); assert.match(help, /--preserve-digests/); assert.match(help, /--authfile/);
@@ -83,14 +83,16 @@ try {
     verifyImportedImage(inspection, { version: '0.5.3', platforms: fixture.platforms }, arch, readDockerArchiveConfig(saved));
   }
   if (buildkitFixture) {
-    // A scratch-only local context: no base-image fetch, RUN command, registry,
-    // real Hub source, or executable. SBOM scanner pulls remain a CI gate.
+    // A scratch-only local context: no RUN, real Hub source or executable.
+    // This explicit option may fetch BuildKit's standard SBOM scanner image;
+    // it never starts the fixture image or publishes an artifact.
     const context = join(root, 'buildkit-context');
     mkdirSync(context);
-    writeFileSync(join(context, 'Dockerfile'), 'FROM scratch\nCOPY fixture.txt /fixture.txt\n');
+    writeFileSync(join(context, 'Dockerfile'), 'FROM scratch\nCOPY fixture.txt /fixture.txt\nUSER 65532:65532\nENTRYPOINT ["/salcara-hub-launcher"]\nLABEL org.opencontainers.image.version="0.5.3" salcara.test="release-oci"\n');
     writeFileSync(join(context, 'fixture.txt'), 'Synthetic BuildKit provenance fixture.\n');
-    run(['buildx', 'build', '--platform', 'linux/amd64', '--tag', `salcara-oci-buildkit-fixture-${suffix}:test`, '--provenance=true', '--sbom=false',
-      '--output', `type=oci,dest=${join(root, 'buildkit.tar')}`, context]);
+    run(['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--tag', `salcara-oci-buildkit-fixture-${suffix}:test`, '--provenance=true', '--sbom=true',
+      '--metadata-file', join(root, 'buildkit-metadata.json'),
+      '--output', `type=oci,oci-mediatypes=true,oci-artifact=true,dest=${join(root, 'buildkit.tar')}`, context], 300000);
     skopeo(['copy', '--all', '--preserve-digests', 'oci-archive:/work/buildkit.tar', 'oci:/work/buildkit-layout:release']);
     const layout = join(root, 'buildkit-layout');
     const blob = descriptor => {
@@ -99,15 +101,15 @@ try {
     };
     const wrapper = JSON.parse(readFileSync(join(layout, 'index.json'), 'utf8'));
     assert.equal(wrapper.manifests.length, 1);
+    const metadata = JSON.parse(readFileSync(join(root, 'buildkit-metadata.json'), 'utf8'));
+    await verifyLayout(layout, '0.5.3', metadata['containerimage.digest']);
     const index = blob(wrapper.manifests[0]);
-    const attestation = index.manifests.find(item => item.annotations?.['vnd.docker.reference.type'] === 'attestation-manifest');
-    assert.ok(attestation, 'real BuildKit must produce its provenance attestation');
-    const target = attestation.annotations['vnd.docker.reference.digest'];
-    assert.ok(index.manifests.some(item => item.digest === target && item.platform?.architecture === 'amd64'));
-    const layers = blob(attestation).layers;
-    const provenance = layers.map(blob).find(item => item.predicateType?.startsWith('https://slsa.dev/provenance/'));
-    assert.ok(provenance?.subject?.some(item => item.digest?.sha256 === target.slice(7)), 'real BuildKit statement subject must bind its target manifest');
-    console.log(`Real scratch BuildKit provenance verified: ${provenance.predicateType}; subject SHA-256 binds the target runtime manifest.`);
+    const attestations = index.manifests.filter(item => item.annotations?.['vnd.docker.reference.type'] === 'attestation-manifest');
+    assert.equal(attestations.length, 2, 'real BuildKit must attest both runtime architectures');
+    for (const attestation of attestations) {
+      assert.equal(blob(attestation).config.mediaType, 'application/vnd.oci.empty.v1+json', 'exercise the real BuildKit OCI empty-config format');
+    }
+    console.log('Real scratch BuildKit OCI artifact verification passed: both platforms, canonical empty configs, all blob hashes, provenance, SBOM and manifest/statement subjects verified by the release validator.');
   }
 } catch (error) {
   failure = error;

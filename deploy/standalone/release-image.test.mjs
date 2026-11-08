@@ -27,12 +27,62 @@ test('OCI verifier follows and hashes the actual graph, requiring both runtime a
   assert.deepEqual(await verifyLayout(f.layout, version, f.indexDigest), { index_digest: f.indexDigest, platforms: f.platforms });
 });
 
+test('OCI 1.1 attestations accept only the canonical empty config while keeping runtime configs and subjects bound', async t => {
+  for (const emptyConfigDescriptor of [undefined, { data: 'e30=' }]) {
+    const f = fixture(t, { emptyAttestationConfig: true, emptyConfigDescriptor });
+    assert.deepEqual(await verifyLayout(f.layout, version, f.indexDigest), { index_digest: f.indexDigest, platforms: f.platforms });
+  }
+});
+
 for (const option of ['rootUser', 'wrongVersion', 'duplicateArch', 'noSBOM', 'noProvenance', 'badPredicate', 'unboundAttestation', 'noSubject', 'wrongSubject']) {
   test(`OCI graph rejects ${option} without invoking a container`, async t => {
     const f = fixture(t, { [option]: true });
     await assert.rejects(verifyLayout(f.layout, version, f.indexDigest));
   });
+  test(`OCI empty-config attestations still reject ${option}`, async t => {
+    const f = fixture(t, { emptyAttestationConfig: true, [option]: true });
+    await assert.rejects(verifyLayout(f.layout, version, f.indexDigest));
+  });
 }
+
+test('OCI empty-config compatibility cannot substitute config content, inline data, size or runtime media type', async t => {
+  for (const options of [
+    { emptyConfigBytes: '[]' },
+    { emptyConfigBytes: 'null' },
+    { emptyConfigBytes: '{"os":"linux"}' },
+    { emptyConfigBytes: '{}\n' },
+    { emptyConfigDescriptor: { size: 3 } },
+    { emptyConfigDescriptor: { data: 'W10=' } },
+    { runtimeConfigMediaType: 'application/vnd.oci.empty.v1+json' },
+  ]) {
+    const f = fixture(t, { emptyAttestationConfig: true, ...options });
+    await assert.rejects(verifyLayout(f.layout, version, f.indexDigest));
+  }
+  const f = fixture(t, { emptyAttestationConfig: true });
+  const emptyDigest = digest(Buffer.from('{}'));
+  writeFileSync(join(f.blobs, emptyDigest.slice(7)), '[]');
+  await assert.rejects(verifyLayout(f.layout, version, f.indexDigest), /digest mismatch/);
+});
+
+test('OCI attestation platform and artifact subject cannot be redirected or relabelled', async t => {
+  for (const options of [
+    { attestationPlatform: { os: 'linux', architecture: 'unknown' } },
+    { attestationPlatform: { os: 'unknown', architecture: 'amd64' } },
+    { manifestSubject: { digest: `sha256:${'c'.repeat(64)}` } },
+    { manifestSubject: { size: 1 } },
+    { manifestSubject: { mediaType: 'application/vnd.oci.image.config.v1+json' } },
+  ]) {
+    const f = fixture(t, { emptyAttestationConfig: true, ...options });
+    await assert.rejects(verifyLayout(f.layout, version, f.indexDigest));
+  }
+  for (const legacyAttestationConfig of [
+    { architecture: 'amd64', os: 'linux', rootfs: { type: 'layers', diff_ids: [] } },
+    { architecture: 'unknown', os: 'unknown', rootfs: { type: 'layers', diff_ids: [`sha256:${'d'.repeat(64)}`] } },
+  ]) {
+    const f = fixture(t, { legacyAttestationConfig });
+    await assert.rejects(verifyLayout(f.layout, version, f.indexDigest));
+  }
+});
 
 test('OCI verifier rejects a changed blob and a different top-level build digest', async t => {
   const f = fixture(t);

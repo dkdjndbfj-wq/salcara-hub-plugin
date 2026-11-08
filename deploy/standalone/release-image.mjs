@@ -12,6 +12,8 @@ export const architectures = ['amd64', 'arm64'];
 const indexType = 'application/vnd.oci.image.index.v1+json';
 const manifestType = 'application/vnd.oci.image.manifest.v1+json';
 const configType = 'application/vnd.oci.image.config.v1+json';
+const emptyConfigType = 'application/vnd.oci.empty.v1+json';
+const emptyConfigDigest = 'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a';
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const provenanceTypes = new Set(['https://slsa.dev/provenance/v0.2', 'https://slsa.dev/provenance/v1']);
 const sbomType = 'https://spdx.dev/Document';
@@ -86,7 +88,6 @@ export async function verifyLayout(directory, version, expectedIndexDigest) {
     const manifest = await blob(descriptor, true);
     assert.equal(manifest.schemaVersion, 2);
     assert.equal(manifest.mediaType, manifestType);
-    assert.equal(manifest.config?.mediaType, configType);
     const config = await blob(manifest.config, true);
     assert.ok(Array.isArray(manifest.layers) && manifest.layers.length <= 64);
     if (descriptor.annotations?.['vnd.docker.reference.type'] === 'attestation-manifest') {
@@ -94,6 +95,27 @@ export async function verifyLayout(directory, version, expectedIndexDigest) {
       assert.match(target || '', digestPattern);
       assert.equal(descriptor.platform?.os, 'unknown');
       assert.equal(descriptor.platform?.architecture, 'unknown');
+      if (manifest.config.mediaType === emptyConfigType) {
+        // OCI 1.1 / current BuildKit use the canonical two-byte {} config for
+        // attestations. Never accept this descriptor as a runnable image config.
+        assert.equal(manifest.config.digest, emptyConfigDigest, 'attestation empty config must be the canonical {} blob');
+        assert.equal(manifest.config.size, 2, 'attestation empty config must contain exactly two bytes');
+        assert.deepEqual(config, {}, 'attestation empty config must be an empty object');
+        if (manifest.config.data !== undefined) assert.equal(manifest.config.data, 'e30=', 'inline empty config must match its blob');
+      } else {
+        assert.equal(manifest.config.mediaType, configType);
+        assert.equal(config.os, 'unknown', 'legacy attestation config must not describe a runtime platform');
+        assert.equal(config.architecture, 'unknown', 'legacy attestation config must not describe a runtime platform');
+        assert.equal(config.rootfs?.type, 'layers');
+        assert.deepEqual(config.rootfs.diff_ids, [], 'legacy attestation config must not declare runtime layers');
+      }
+      // Modern BuildKit additionally binds the OCI artifact manifest itself to
+      // its subject. Keep the per-statement subject checks below in both formats.
+      if (manifest.subject !== undefined) {
+        assert.equal(manifest.subject.mediaType, manifestType);
+        assert.equal(manifest.subject.digest, target, 'attestation manifest subject must match its annotated target');
+        await blob(manifest.subject);
+      }
       const types = new Set();
       for (const layer of manifest.layers) {
         assert.equal(layer.mediaType, 'application/vnd.in-toto+json');
@@ -108,6 +130,7 @@ export async function verifyLayout(directory, version, expectedIndexDigest) {
       }
       attestations.push({ target, types });
     } else {
+      assert.equal(manifest.config?.mediaType, configType, 'runtime image requires an OCI image config');
       const arch = descriptor.platform?.architecture;
       assert.ok(architectures.includes(arch), 'unexpected runtime architecture');
       assert.equal(descriptor.platform.os, 'linux');
