@@ -203,7 +203,7 @@ func ParseRemoteAccessPolicy(data []byte) (RemoteAccessPolicy, error) {
 // Workspace tools use the paired computer/project authority, independent of an AI provider.
 func sourceWorkspaceCommand(typ string) bool {
 	switch typ {
-	case "workspace.artifacts", "workspace.projects":
+	case "workspace.artifacts", "workspace.projects", "workspace.explorer":
 		return true
 	case "workspace.project.preview", "workspace.git.read", "workspace.git.mutate", "workspace.files.mutate", "workspace.preview.file", "workspace.preview.open", "workspace.preview.frame", "workspace.preview.input", "workspace.preview.close", "workspace.files.write", "workspace.terminal.open", "workspace.terminal.read", "workspace.terminal.input", "workspace.terminal.resize", "workspace.terminal.close":
 		return true
@@ -374,7 +374,7 @@ func commandMeta(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	// encoding/json accepts them case-insensitively while this parser performs
 	// exact-key lookups; otherwise a signed {"model":...} could be paired with
 	// a later {"Model":...} value observed by the Bridge.
-	meta, err := strictObjectFields(raw, []string{"type", "tool", "agent", "controlSurface", "accountId", "model", "sessionKey", "contextReferences"})
+	meta, err := strictObjectFields(raw, []string{"type", "tool", "agent", "controlSurface", "accountId", "model", "sessionKey", "contextReferences", "projectless", "cwd", "workspaceMode", "operationId"})
 	if err == nil {
 		err = validateDiffAnnotations(meta)
 	}
@@ -386,6 +386,12 @@ func commandMeta(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	}
 	if err == nil {
 		err = validateWorkspaceProjectsCommand(meta)
+	}
+	if err == nil {
+		err = validateProjectlessCommand(meta)
+	}
+	if err == nil {
+		err = validateWorkspaceExplorerCommand(meta)
 	}
 	return meta, err
 }

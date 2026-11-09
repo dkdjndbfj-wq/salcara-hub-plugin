@@ -473,7 +473,7 @@ func (h *Hub) cachedReceiptReplay(acct string, r *http.Request, req commandReq) 
 	return paired
 }
 func (h *Hub) commandCapabilities() ([]string, int64) {
-	capabilities := []string{"events.cursor.v1", "events.wait.v1"}
+	capabilities := []string{"events.cursor.v1", "events.wait.v1", "workspace.explorer.v1"}
 	if h.receipts != nil && h.receipts.dir != "" {
 		capabilities = append(capabilities, "commands.idempotency.v1")
 		capabilities = append(capabilities, "session.revert.v1")
@@ -481,7 +481,7 @@ func (h *Hub) commandCapabilities() ([]string, int64) {
 		capabilities = append(capabilities, "station.standby.v1")
 	}
 	if h.durable != nil {
-		capabilities = append(capabilities, "commands.durable.v2", "events.durable.v1", "storage.blobs.v1", "events.binding-scope.v1")
+		capabilities = append(capabilities, "commands.durable.v2", "events.durable.v1", "storage.blobs.v1", "events.binding-scope.v1", "session.projectless.v1")
 	}
 	return capabilities, int64(commandReceiptTTL / time.Second)
 }
