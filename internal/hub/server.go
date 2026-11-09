@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -161,6 +162,7 @@ func New(cfg Config) (*Hub, error) {
 	h.auth.cfg = &h.cfg
 	h.routes = map[string]route{
 		"/ping":                    {http.MethodGet, false, h.handlePing},
+		"/discovery/policy":        {http.MethodGet, false, h.handleDiscoveryPolicy},
 		"/ingress/manifest":        {http.MethodGet, false, h.handleIngressManifest},
 		"/ingress/identity":        {http.MethodGet, false, h.handleIngressIdentity},
 		"/device/register":         {http.MethodPost, false, h.handleDeviceRegister},
@@ -230,7 +232,15 @@ func New(cfg Config) (*Hub, error) {
 	if h.push.enabled() {
 		go h.runPush(h.done)
 	}
-	h.ingress = newIngressRegistry(h.cfg.DataDir, h.cfg.PublicURL)
+	ingressURL := h.cfg.PublicURL
+	ingressRoot := false
+	if public, err := url.Parse(ingressURL); err == nil {
+		ingressRoot = h.cfg.Prefix == "" && public.Path == ""
+	}
+	if ingressURL != "" && (ingressRoot || h.cfg.Prefix != "" && strings.HasSuffix(ingressURL, h.cfg.Prefix)) {
+		ingressURL += "/v1"
+	}
+	h.ingress = newIngressRegistry(h.cfg.DataDir, ingressURL)
 	go h.saver()
 	go h.janitor()
 	if h.durable != nil {
@@ -349,7 +359,7 @@ func (h *Hub) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	h.lifecycleMu.Lock()
 	if h.stopped {
 		h.lifecycleMu.Unlock()
-		writeError(rw, http.StatusServiceUnavailable, "服务正在重启，请稍后重试")
+		writeCodedError(rw, http.StatusServiceUnavailable, "remote_unavailable", "服务正在重启，请稍后重试")
 		return
 	}
 	h.activeRequests.Add(1)
@@ -405,7 +415,20 @@ func (h *Hub) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 	var acct string
 	if rt.auth {
-		if r.Header.Get("X-Salcara-Device-Id") != "" || r.Header.Get("X-Salcara-Pair-Token") != "" || r.Header.Get("X-Salcara-Bot-Token") != "" {
+		deviceAuth := false
+		for _, name := range []string{"X-Salcara-Device-Id", "X-Salcara-Pair-Token", "X-Salcara-Bot-Token"} {
+			if len(r.Header.Values(name)) > 1 || r.Header.Get(name) != "" {
+				deviceAuth = true
+			}
+		}
+		// Legacy clients send a bearer key and a device secret, without a
+		// device ID. Preserve that explicit mode only where legacy is enabled;
+		// a secret alone must never trigger model API authentication.
+		secrets := r.Header.Values("X-Salcara-Device-Secret")
+		if len(secrets) > 1 || len(secrets) == 1 && secrets[0] != "" && (h.cfg.DisableLegacyAPIKey || bearerKey(r) == "") {
+			deviceAuth = true
+		}
+		if deviceAuth {
 			acct, ok = h.deviceOnlyAuth(w, r, localPath, ip)
 		} else {
 			acct, ok = h.authenticate(w, r, ip)
@@ -420,7 +443,7 @@ func (h *Hub) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 
 func (h *Hub) authenticate(w http.ResponseWriter, r *http.Request, ip string) (string, bool) {
 	if h.cfg.DisableLegacyAPIKey {
-		writeError(w, http.StatusUnauthorized, "请使用已配对的设备凭据；本站不接受模型 API Key 登录")
+		writeCodedError(w, http.StatusUnauthorized, "device_credentials_required", "请使用已配对的设备凭据；本站不接受模型 API Key 登录")
 		return "", false
 	}
 	key := bearerKey(r)
@@ -609,15 +632,15 @@ func (h *Hub) handlePing(w http.ResponseWriter, r *http.Request, _ string) {
 	if !h.cfg.DisableLegacyAPIKey {
 		authModes = append(authModes, "legacy-api-key")
 	}
-	remoteAccess, allowed := h.discoveryUserPolicy(r)
-	if !allowed {
-		writeError(w, http.StatusForbidden, "设备凭据或登记码无效")
-		return
+	caps = append(caps, "discovery.policy.v1")
+	if h.IngressState().Configured {
+		caps = append(caps, "ingress.signed-manifest.v1")
 	}
+	remoteAccess := h.CurrentRemoteAccessPolicy()
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "salcara-hub", "version": Version, "protocol": "salcara-remote", "protocolVersion": 1, "authModes": authModes, "capabilities": caps, "commandIdempotencyTTLSeconds": ttl,
 		"desktopCompatibility": h.desktopCompatibility(),
-		"remoteAccess":         map[string]any{"mode": remoteAccess.Mode, "revision": remoteAccess.Revision, "issuerCount": len(remoteAccess.Issuers), "station": remoteAccess.Station}})
+		"remoteAccess":         discoveryPolicyView(remoteAccess)})
 }
 
 func (h *Hub) handleMe(w http.ResponseWriter, _ *http.Request, acct string) {

@@ -85,6 +85,8 @@ type IngressManifest struct {
 	IssuedAt          int64                     `json:"issued_at"`
 	ExpiresAt         int64                     `json:"expires_at"`
 	Endpoints         []IngressManifestEndpoint `json:"endpoints"`
+	SignedPayload     string                    `json:"signed_payload,omitempty"`
+	Signature         string                    `json:"signature,omitempty"`
 }
 type IngressProof struct {
 	Version       int    `json:"version"`
@@ -144,7 +146,7 @@ func ingressPublicIP(ip netip.Addr) bool {
 }
 func ingressAPIURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || len(raw) > 512 || u == nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || u.Opaque != "" || strings.ContainsAny(raw, "\\\r\n\t ") {
+	if err != nil || len(raw) > 512 || u == nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || u.Opaque != "" || strings.ContainsAny(raw, "%#\\\r\n\t ") {
 		return "", errors.New("invalid_ingress_url")
 	}
 	host := strings.ToLower(u.Hostname())
@@ -160,7 +162,30 @@ func ingressAPIURL(raw string) (string, error) {
 			return "", errors.New("invalid_ingress_url")
 		}
 	}
-	if u.Path != "" && u.Path != "/" && u.Path != "/salcara-hub" && u.Path != "/salcara-hub/" && u.Path != "/salcara-hub/v1" && u.Path != "/salcara-hub/v1/" {
+	// An ingress identifies the complete Hub endpoint, not a hostname or path
+	// prefix. Preserve explicit mount prefixes and reject ambiguous spellings
+	// instead of cleaning paths that a reverse proxy might interpret differently.
+	if strings.Contains(u.Path, "//") || u.EscapedPath() != u.Path {
+		return "", errors.New("invalid_ingress_url")
+	}
+	for _, segment := range strings.Split(u.Path, "/") {
+		if segment == "." || segment == ".." {
+			return "", errors.New("invalid_ingress_url")
+		}
+		for _, ch := range segment {
+			if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '.' || ch == '_' || ch == '~' || ch == '-') {
+				return "", errors.New("invalid_ingress_url")
+			}
+		}
+	}
+	hubPath := strings.TrimSuffix(u.Path, "/")
+	switch {
+	case hubPath == "":
+		hubPath = "/salcara-hub/v1"
+	case strings.HasSuffix(hubPath, "/salcara-hub"):
+		hubPath += "/v1"
+	case strings.HasSuffix(hubPath, "/v1"):
+	default:
 		return "", errors.New("invalid_ingress_url")
 	}
 	u.Host = strings.ToLower(u.Host)
@@ -170,8 +195,12 @@ func ingressAPIURL(raw string) (string, error) {
 			u.Host = "[" + u.Host + "]"
 		}
 	}
-	u.Path = "/salcara-hub/v1"
-	return u.String(), nil
+	u.Path = hubPath
+	normalized := u.String()
+	if len(normalized) > 512 {
+		return "", errors.New("invalid_ingress_url")
+	}
+	return normalized, nil
 }
 func ingressClient() *http.Client {
 	return &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true, TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 3 * time.Second, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -568,6 +597,9 @@ func (r *ingressRegistry) verify(job *IngressVerification, endpoints []IngressEn
 	job.Running = false
 	r.mu.Unlock()
 }
+func ingressManifestMessage(payload []byte) []byte {
+	return append([]byte("salcara-ingress-manifest-v1\n"), payload...)
+}
 func (h *Hub) handleIngressManifest(w http.ResponseWriter, req *http.Request, _ string) {
 	r := h.ingress
 	r.mu.Lock()
@@ -586,6 +618,15 @@ func (h *Hub) handleIngressManifest(w http.ResponseWriter, req *http.Request, _ 
 		}
 	}
 	sort.SliceStable(m.Endpoints, func(i, j int) bool { return m.Endpoints[i].Priority < m.Endpoints[j].Priority })
+	// Sign the exact unsigned JSON bytes so clients can authenticate the complete
+	// endpoint list without reproducing JSON serialization across platforms.
+	payload, err := json.Marshal(m)
+	if err != nil {
+		writeError(w, 500, "ingress_manifest_failed")
+		return
+	}
+	m.SignedPayload = base64.StdEncoding.EncodeToString(payload)
+	m.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(r.key, ingressManifestMessage(payload)))
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, 200, m)
 }

@@ -44,7 +44,7 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 	secretHash, secretOK := deviceSecret(r)
 	if !secretOK {
 		h.limiter.fail(ip)
-		writeError(w, 403, "缺少独立设备凭证")
+		writeCodedError(w, 403, "device_credentials_invalid", "缺少独立设备凭证")
 		return
 	}
 	accountID := deviceAccount(info.DeviceID)
@@ -52,14 +52,14 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		p := BotBindingPackage{Type: botBindingType, Version: botBindingVersion, HubURL: h.cfg.PublicURL, GroupID: strings.TrimSpace(r.Header.Get("X-Salcara-Bot-Group")), Invite: invite, Signature: strings.TrimSpace(r.Header.Get("X-Salcara-Bot-Signature"))}
 		if h.cfg.DeploymentMode != "bot" || !validBotPackage(p) {
 			h.limiter.fail(ip)
-			writeError(w, 403, "Bot 绑定包无效")
+			writeCodedError(w, 403, "bot_credentials_invalid", "Bot 绑定包无效")
 			return
 		}
 		h.mu.Lock()
 		g := h.botGroupForPackageLocked(p)
 		if g == nil || !g.Computers[info.DeviceID] && len(g.Computers) >= maxBotComputers {
 			h.mu.Unlock()
-			writeError(w, 403, "Bot 绑定包无效或设备上限已满")
+			writeCodedError(w, 403, "bot_credentials_invalid", "Bot 绑定包无效或设备上限已满")
 			return
 		}
 		st, status, deferred := h.registerDeviceLocked(accountID, info, secretHash)
@@ -68,7 +68,7 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		}
 		h.mu.Unlock()
 		if status != 0 {
-			writeError(w, status, "电脑登记失败")
+			writeCodedError(w, status, deviceRegistrationFailureCode(status), "电脑登记失败")
 			return
 		}
 		if err := h.saveNowError(); err != nil {
@@ -92,13 +92,13 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		if existing == nil || !matchesDeviceSecret(existing, r) || existing.banned {
 			h.mu.Unlock()
 			h.limiter.fail(ip)
-			writeError(w, http.StatusForbidden, "Bot 首次登记需要 Salcara Hub 签发的绑定包")
+			writeCodedError(w, http.StatusForbidden, "bot_credentials_invalid", "Bot 首次登记需要 Salcara Hub 签发的绑定包")
 			return
 		}
 		st, status, deferred := h.registerDeviceLocked(accountID, info, secretHash)
 		h.mu.Unlock()
 		if status != 0 {
-			writeError(w, status, "电脑身份验证失败或本站设备容量已满")
+			writeCodedError(w, status, deviceRegistrationFailureCode(status), "电脑身份验证失败或本站设备容量已满")
 			return
 		}
 		if deferred {
@@ -118,18 +118,18 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 	// clients' failures behind the same address; everyone else is rate limited.
 	if !(exists && matchesDeviceSecret(a.devices[info.DeviceID], r)) && h.limiter.blocked(ip) {
 		h.mu.Unlock()
-		writeError(w, 429, "身份验证失败次数过多，请稍后重试")
+		writeCodedError(w, 429, "remote_rate_limited", "身份验证失败次数过多，请稍后重试")
 		return
 	}
 	if exists && !matchesDeviceSecret(a.devices[info.DeviceID], r) {
 		h.mu.Unlock()
 		h.limiter.fail(ip)
-		writeError(w, 403, "设备身份验证失败")
+		writeCodedError(w, 403, "device_credentials_invalid", "设备身份验证失败")
 		return
 	}
 	if !exists && h.enrollLimiter.blocked(ip) {
 		h.mu.Unlock()
-		writeError(w, 429, "设备登记过于频繁或达到本站容量限制，请稍后重试")
+		writeCodedError(w, 429, "remote_rate_limited", "设备登记过于频繁或达到本站容量限制，请稍后重试")
 		return
 	}
 	if !exists {
@@ -137,12 +137,16 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		if !claimOK || !h.enrollmentClaimValidLocked(claimHash) {
 			h.mu.Unlock()
 			h.limiter.fail(ip)
-			writeError(w, http.StatusForbidden, "首次登记需要有效的一次性设备登记码")
+			code := "enrollment_claim_invalid"
+			if r.Header.Get("X-Salcara-Enrollment-Claim") == "" {
+				code = "device_enrollment_required"
+			}
+			writeCodedError(w, http.StatusForbidden, code, "首次登记需要有效的一次性设备登记码")
 			return
 		}
 		if status := h.preflightNewDeviceLocked(accountID, info); status != 0 {
 			h.mu.Unlock()
-			writeError(w, status, "本站设备容量已满或设备身份不可用")
+			writeCodedError(w, status, deviceRegistrationFailureCode(status), "本站设备容量已满或设备身份不可用")
 			return
 		}
 		userID := h.enrollmentOwners[claimHash]
@@ -165,7 +169,7 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 	st, status, deferred := h.registerDeviceLocked(accountID, info, secretHash)
 	h.mu.Unlock()
 	if status != 0 {
-		writeError(w, status, "电脑身份验证失败或本站设备容量已满")
+		writeCodedError(w, status, deviceRegistrationFailureCode(status), "电脑身份验证失败或本站设备容量已满")
 		return
 	}
 	if !exists && h.cfg.DataDir != "" {
@@ -187,6 +191,19 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 
 func validDeviceInfo(info Device) bool {
 	return validID(info.DeviceID) && len(info.Name) <= 256 && len(info.OS) <= 128 && len(info.Version) <= 128
+}
+
+// Registration has already separated the IP limit from admission failures.
+// These statuses describe only remote device admission, never model API auth.
+func deviceRegistrationFailureCode(status int) string {
+	switch status {
+	case http.StatusTooManyRequests:
+		return "device_capacity_exceeded"
+	case http.StatusBadRequest:
+		return "invalid_request"
+	default:
+		return "device_credentials_invalid"
+	}
 }
 
 // registerDeviceLocked is shared by legacy and device-only enrollment. Caller
@@ -304,18 +321,24 @@ func (h *Hub) deviceOnlyAuth(w http.ResponseWriter, r *http.Request, path, ip st
 		}
 	}
 	if h.limiter.blocked(ip) {
-		writeError(w, 429, "身份验证失败次数过多")
+		writeCodedError(w, 429, "remote_rate_limited", "身份验证失败次数过多")
 		return "", false
 	}
 	h.limiter.fail(ip)
-	writeError(w, 403, "设备凭证或手机绑定已失效，请重新扫码绑定")
+	code := "device_credentials_invalid"
+	if strings.HasPrefix(path, "/bot/") || strings.HasPrefix(path, "/app/") && r.Header.Get("X-Salcara-Bot-Token") != "" {
+		code = "bot_credentials_invalid"
+	} else if strings.HasPrefix(path, "/app/") {
+		code = "pair_credentials_invalid"
+	}
+	writeCodedError(w, 403, code, "设备凭证或手机绑定已失效，请重新扫码绑定")
 	return "", false
 }
 
 func (h *Hub) handleQRPair(w http.ResponseWriter, r *http.Request, _ string) {
 	ip := clientIP(r, h.cfg.TrustProxy)
 	if h.limiter.blocked(ip) {
-		writeError(w, 429, "配对失败次数过多，请稍后再试")
+		writeCodedError(w, 429, "remote_rate_limited", "配对失败次数过多，请稍后再试")
 		return
 	}
 	var in struct {

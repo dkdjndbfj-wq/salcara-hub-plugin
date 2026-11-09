@@ -218,7 +218,7 @@ func failure(w http.ResponseWriter, status int, message string) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	headers(w)
 	if s.stopped.Load() {
-		failure(w, http.StatusServiceUnavailable, "Hub 正在重启，请稍后重试")
+		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "Hub 正在重启，请稍后重试", "code": "remote_unavailable"})
 		return
 	}
 	if r.URL.Path == "/healthz" {
@@ -264,7 +264,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				respond(w, http.StatusOK, ping)
 				return
 			}
-			failure(w, http.StatusServiceUnavailable, "Hub discovery unavailable")
+			if buf.status >= 400 && buf.status <= 599 {
+				for key, values := range buf.header {
+					w.Header()[key] = values
+				}
+				w.WriteHeader(buf.status)
+				_, _ = w.Write(buf.body.Bytes())
+				return
+			}
+			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "Hub discovery unavailable", "code": "remote_unavailable"})
 			return
 		}
 		s.hub.ServeHTTP(w, r)

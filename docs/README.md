@@ -10,6 +10,7 @@
 - [托管订阅与代理池使用说明](MANAGED-PROXY-POOL.zh.md)：管理员接入、兼容矩阵、自动更新、故障恢复和本地验证边界。
 - [配置安全发布与运行观测](EDGE-SAFE-RELEASE-AND-OBSERVABILITY.zh.md)：预检、试运行、回滚 CLI、检测取消、共享预算和趋势 API。
 - [同一个 Hub 的多个 HTTPS 入口](MULTI-INGRESS-HA.zh.md)：电脑与手机透明切换、签名身份、缓存时限及入口管理。
+- [远程发现与身份协议](REMOTE-DISCOVERY-CONTRACT.zh.md)：匿名发现、用户策略、错误分类、签名入口清单及完整路径边界。
 - [节点网络归属观察](NODE-NETWORK-OBSERVATION.zh.md)：本地国家与 ASN 数据、自动观察、地区策略和失败恢复。
 - [订阅来源共享并发额度](SUBSCRIPTION-SHARED-CAPACITY.zh.md)：全池、来源、节点三层准入与跨代连接计数。
 - [全站远程使用授权](REMOTE-SOURCE-AUTHORIZATION.zh.md)：本站／外站 API、反代账号独立开关、地址名单、签名状态和旧客户端升级。

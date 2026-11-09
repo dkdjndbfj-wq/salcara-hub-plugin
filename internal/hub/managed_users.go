@@ -432,29 +432,32 @@ func (h *Hub) assignEnrolledUserLocked(deviceID, userID string) error {
 	return h.commitManagedUsersLocked(next)
 }
 
-// Public discovery is global. Only proven devices or unused invitations may
-// observe a user's exception; never trust a user ID supplied by the client.
-func (h *Hub) discoveryUserPolicy(r *http.Request) (RemoteAccessPolicy, bool) {
+// Only proven devices or unused invitations may observe a user exception;
+// this read never consumes an invitation or falls back to anonymous policy.
+func (h *Hub) scopedDiscoveryPolicy(r *http.Request) (RemoteAccessPolicy, string, string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if claim := r.Header.Get("X-Salcara-Enrollment-Claim"); claim != "" {
 		hash, ok := enrollmentClaimHash(claim)
 		if !ok || !h.enrollmentClaimValidLocked(hash) {
-			return RemoteAccessPolicy{}, false
+			return RemoteAccessPolicy{}, "", "enrollment_claim_invalid"
 		}
 		p := cloneRemoteAccessPolicy(h.cfg.RemoteAccess)
 		if u := h.managedUserLocked(h.enrollmentOwners[hash]); u != nil && u.Station != nil {
 			p.Station = cloneStationPolicy(u.Station)
 			p.Revision = "invite-" + shaHex(p.Revision+u.Revision+hex.EncodeToString(hash[:]))
 		}
-		return p, true
+		return p, "enrollment", ""
 	}
 	if id := r.Header.Get("X-Salcara-Device-Id"); id != "" {
 		a := h.accounts[deviceAccount(id)]
-		if a == nil || a.devices[id] == nil || !matchesDeviceSecret(a.devices[id], r) {
-			return RemoteAccessPolicy{}, false
+		if !validID(id) || a == nil || a.devices[id] == nil || a.devices[id].banned || !matchesDeviceSecret(a.devices[id], r) {
+			return RemoteAccessPolicy{}, "", "device_credentials_invalid"
 		}
-		return h.userPolicyLocked(id), true
+		if h.userDisabledLocked(id) {
+			return RemoteAccessPolicy{}, "", "user_disabled"
+		}
+		return h.userPolicyLocked(id), "device", ""
 	}
-	return cloneRemoteAccessPolicy(h.cfg.RemoteAccess), true
+	return RemoteAccessPolicy{}, "", "device_credentials_invalid"
 }
