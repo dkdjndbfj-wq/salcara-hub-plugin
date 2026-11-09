@@ -8,6 +8,24 @@
 
 `remoteAccess` 仅为全站公开策略。即使请求携带有效身份，也不会返回用户例外。旧设备凭证不影响健康 Hub 返回 200；停止中的 Hub 返回 503 和 `code: remote_unavailable`。独立部署的包装层保留底层 4xx/5xx 状态、错误码和响应头，不把设备拒绝改写成服务故障。
 
+## 只填写 API 地址时的发现范围
+
+普通用户继续只填写模型 API 地址和 Key。客户端只取地址生成匿名候选，不要求补填 Hub 状态页地址，不读取状态页 HTML，也不向候选发送模型 Key。独立 Docker Hub 的默认公开发现端点为 `/salcara-hub/v1/ping`。
+
+配套 Bridge 的 `DiscoveryTargets(apiURL, "")` 按以下顺序探测；表内均为同一 origin 下的实际 GET 路径：
+
+| 已保存的 API 地址 | 按顺序探测的路径 |
+| --- | --- |
+| `https://api.example` | `/salcara-hub/v1/ping` |
+| `https://api.example/v1` | `/salcara-hub/v1/ping`，`/v1/ping` |
+| `https://api.example/team` 或 `/team/v1` | `/team/salcara-hub/v1/ping`，`/salcara-hub/v1/ping`，`/team/v1/ping` |
+
+只有前一个候选返回 404 才继续；403、503、重定向、超时或不兼容的成功响应不会触发路径搜索。最多三个候选，不枚举其他目录。最后一个候选支持 Hub 直接挂载在已提供的 API 路径，但仍要求返回完整 Hub 协议。已有内部连接地址恰好以 `/salcara-hub` 或 `/salcara-hub/v1` 结尾时只探测该入口；这属于兼容行为，不要求用户把该地址填成模型 API 地址。
+
+支持完整自定义入口路径，并不代表只凭 origin 就能发现任意未知路径。例如用户保存 `https://api.example`，Hub 只部署在 `/private/remote/v1`，且没有上述公开入口或已有受信连接时，本契约不能自动找到它。运营方需提供约定的公开发现入口，或使 Hub 挂载与实际 API 路径约定一致；客户端不能让普通用户改填状态页来补救。本轮没有新增 well-known 发现端点或修改代理配置。
+
+签名 ingress 清单在**已经找到 Hub、能读取清单之后**提供完整自定义入口列表，再通过固定身份和新 nonce 证明验证别名。它不解决首次定位清单自身所在的未知路径。内部显式 `override` 或已保存入口可以精确访问自定义路径；`Discover(alias, alias)` 仅证明这种已知地址流程，不能作为 `Discover(apiURL, "")` 首次发现的验收证据。客户端需要分别验证候选顺序/404 边界与签名别名流程。
+
 ## 有效用户策略
 
 声明 `discovery.policy.v1` 后，客户端通过 `GET <hub-api>/discovery/policy` 读取有效策略，使用下面一种身份：
