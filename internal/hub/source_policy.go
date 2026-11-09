@@ -203,7 +203,7 @@ func ParseRemoteAccessPolicy(data []byte) (RemoteAccessPolicy, error) {
 // Workspace tools use the paired computer/project authority, independent of an AI provider.
 func sourceWorkspaceCommand(typ string) bool {
 	switch typ {
-	case "workspace.artifacts":
+	case "workspace.artifacts", "workspace.projects":
 		return true
 	case "workspace.project.preview", "workspace.git.read", "workspace.git.mutate", "workspace.files.mutate", "workspace.preview.file", "workspace.preview.open", "workspace.preview.frame", "workspace.preview.input", "workspace.preview.close", "workspace.files.write", "workspace.terminal.open", "workspace.terminal.read", "workspace.terminal.input", "workspace.terminal.resize", "workspace.terminal.close":
 		return true
@@ -383,6 +383,9 @@ func commandMeta(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	}
 	if err == nil {
 		err = validateSessionRevertCommand(meta)
+	}
+	if err == nil {
+		err = validateWorkspaceProjectsCommand(meta)
 	}
 	return meta, err
 }
