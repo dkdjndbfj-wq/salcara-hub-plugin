@@ -6,7 +6,7 @@ umask 077
 
 mode='station'
 source_build=false
-version='0.5.3'
+version='0.5.4'
 version_pattern=''
 image=''
 project=''
@@ -20,7 +20,7 @@ initialized=false
 usage() {
     printf '%s\n' \
         '首次部署 Salcara Hub（Linux；需要已有 Docker、Compose、HTTPS 反代）。' \
-        'Station / Bot 均使用 0.5.3；安装前须有对应的正式 Release 和镜像。' \
+        'Station / Bot 均使用 0.5.4；安装前须有对应的正式 Release 和镜像。' \
 	    'Bot 源码兜底：仅构建干净 Git 提交中的 Bot 源码，使用 --source-build 显式启用。' \
 	    '用法：bash deploy/standalone/install.sh [--mode station|bot --source-build --public-url URL --install-dir ABSOLUTE_PATH]' \
         '示例：bash deploy/standalone/install.sh --public-url https://relay.example.com/salcara-hub --install-dir /opt/salcara-hub' \

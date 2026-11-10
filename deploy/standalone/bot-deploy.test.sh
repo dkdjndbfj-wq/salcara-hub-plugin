@@ -57,7 +57,7 @@ docker() {
         'context show') printf 'stub-local\n' ;;
         'context inspect') printf 'unix:///test-only/docker.sock\n' ;;
         'info --format') printf 'linux\n' ;;
-        'pull ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.3')
+        'pull ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.4')
             printf 'docker:pull\n' >> "$mock_calls"
             [[ "$mock_mode" != registry_pull_failure ]] ;;
         'compose version') : ;;
@@ -98,7 +98,7 @@ docker() {
                 '{{.Id}}')
                     if [[ "$mock_mode" == source_image_missing && ! -f "$mock_image_restored" ]]; then return 1; fi
                     printf 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n' ;;
-                '{{ index .Config.Labels "org.opencontainers.image.version" }}') printf '0.5.3\n' ;;
+                '{{ index .Config.Labels "org.opencontainers.image.version" }}') printf '0.5.4\n' ;;
                 *) printf 'UNEXPECTED_IMAGE_INSPECT\n' >&2; return 99 ;;
             esac ;;
         save\ *)
@@ -130,8 +130,8 @@ curl() {
     done
     printf '%s\n' "$endpoint" >> "$mock_calls"
     case "$endpoint" in
-        'https://api.github.com/repos/dkdjndbfj-wq/salcara-hub-plugin/releases/tags/standalone-v0.5.3')
-            printf '{"tag_name":"standalone-v0.5.3","draft":false,"prerelease":false}\n' ;;
+        'https://api.github.com/repos/dkdjndbfj-wq/salcara-hub-plugin/releases/tags/standalone-v0.5.4')
+            printf '{"tag_name":"standalone-v0.5.4","draft":false,"prerelease":false}\n' ;;
         'https://bot.example.com/salcara-hub/_admin/v1/auth/login')
             [[ "$origin" == 'https://bot.example.com' && "$body_file" == @* ]] || return 99
             grep -Fq "$test_secret" "${body_file#@}" || return 99
@@ -142,7 +142,7 @@ curl() {
             [[ -n "$output_file" ]] && printf '%s\n' "$package" > "$output_file"
             printf '201' ;;
         'http://127.0.0.1:8787/healthz')
-            printf '{"ok":true,"product":"salcara-hub-standalone","version":"0.5.3"}\n' ;;
+            printf '{"ok":true,"product":"salcara-hub-standalone","version":"0.5.4"}\n' ;;
         'https://bot.example.com/salcara-hub/v1/ping')
             [[ "$mock_mode" != bad_public ]] || return 22
             printf '{"service":"salcara-hub"}\n' ;;
@@ -155,7 +155,7 @@ export -f uname ss sleep flock git docker curl
 
 install_dir="$test_sandbox/install"
 mkdir -m 700 -- "$install_dir" "$install_dir/secrets"
-printf '%s\n' 'SALCARA_HUB_MODE=bot' 'SALCARA_HUB_IMAGE_VERSION=0.5.3' 'SALCARA_HUB_PROJECT=salcara-hub-bot' 'SALCARA_HUB_DATA_VOLUME=salcara-hub-bot_hub-data' 'SALCARA_HUB_PUBLIC_URL=https://bot.example.com/salcara-hub' > "$install_dir/.env"
+printf '%s\n' 'SALCARA_HUB_MODE=bot' 'SALCARA_HUB_IMAGE_VERSION=0.5.4' 'SALCARA_HUB_PROJECT=salcara-hub-bot' 'SALCARA_HUB_DATA_VOLUME=salcara-hub-bot_hub-data' 'SALCARA_HUB_PUBLIC_URL=https://bot.example.com/salcara-hub' > "$install_dir/.env"
 printf '%s\n' "$test_secret" > "$install_dir/secrets/admin-initial-login.txt"
 chmod 600 -- "$install_dir/.env" "$install_dir/secrets/admin-initial-login.txt"
 printf 'name: salcara-hub-bot\n' > "$install_dir/compose.release.yml"
@@ -180,11 +180,11 @@ set +e
 success_output=$(bash "$script_dir/install.sh" --mode bot --public-url https://bot.example.com/salcara-hub --install-dir "$success_dir" 2>&1)
 success_status=$?
 set -e
-[[ $success_status -eq 0 && "$success_output" == *"$package"* && "$success_output" == *'版本 0.5.3'* ]] || { printf 'FAIL: first Bot install (%s)\n%s\n' "$success_status" "$success_output" >&2; exit 1; }
+[[ $success_status -eq 0 && "$success_output" == *"$package"* && "$success_output" == *'版本 0.5.4'* ]] || { printf 'FAIL: first Bot install (%s)\n%s\n' "$success_status" "$success_output" >&2; exit 1; }
 [[ "$success_output" != *"$test_secret"* ]]
 [[ "$(<"$success_dir/bot-binding.json")" == "$package" ]]
 [[ "$(stat -c '%a' "$success_dir/bot-binding.json")" == 600 ]]
-grep -Fxq 'SALCARA_HUB_IMAGE_VERSION=0.5.3' "$success_dir/.env"
+grep -Fxq 'SALCARA_HUB_IMAGE_VERSION=0.5.4' "$success_dir/.env"
 [[ -f "$success_dir/resume-bot.sh" && -f "$success_dir/create-bot-binding.sh" ]]
 printf 'PASS: first Bot install checks the full public path and emits its signed binding package\n'
 
