@@ -1,0 +1,35 @@
+name: Hub 0.5.5 original artifact QA staging
+on:
+  workflow_dispatch:
+    inputs:
+      stage_original_zip:
+        description: Stage only the fixed original Actions ZIP in an unpublished draft
+        type: boolean
+        required: true
+        default: false
+permissions: {}
+concurrency:
+  group: hub-qa-original-artifact-0.5.5
+  cancel-in-progress: false
+jobs:
+  stage:
+    if: ${{ inputs.stage_original_zip }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test fixed-source QA transport without credentials or network
+        run: node --test .github/scripts/hub-artifact-qa-stage.test.mjs
+      - name: Verify original bytes and stage only in a draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STAGE_ORIGINAL_ZIP: ${{ inputs.stage_original_zip }}
+        run: node .github/scripts/hub-artifact-qa-stage.mjs
