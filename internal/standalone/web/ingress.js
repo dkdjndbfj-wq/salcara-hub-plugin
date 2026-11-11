@@ -5,6 +5,26 @@
     const text = (tag, value, cls) => { const el = document.createElement(tag); el.textContent = value; if (cls) el.className = cls; return el; };
     const names = { unverified: '待验证', verifying: '正在验证', verified: '已验证同一 Hub', failed: '验证失败', interrupted: '验证中断' };
     const errors = { revision_conflict: '配置已更新，请重新读取后修改。', ingress_busy: '入口验证正在运行，请等待完成。', invalid_ingress_url: '请填写公网 HTTPS 入口地址，不含账号、查询参数或片段。', invalid_ingress_configuration: '请检查入口名称、重复地址和优先级（1–1000）。', ingress_storage_failed: '配置写入失败，原配置保留；请检查 Hub 磁盘。', ingress_not_configured: '请先在部署配置中设置公网 HTTPS Hub 地址。' };
+    const identity = text('details', '', 'info-details'); identity.open = false;
+    identity.append(text('summary', '核对手机连接身份'));
+    const identityFields = text('div', ''), identityValues = {};
+    for (const [key, label] of [['hub_instance_id', '实例 ID'], ['identity_public_key', '身份公钥（Base64）']]) {
+      const field = text('label', '', 'field'), value = document.createElement('textarea');
+      value.readOnly = true; value.rows = 2; value.spellcheck = false; value.autocomplete = 'off';
+      field.append(text('span', label), value); identityFields.append(field); identityValues[key] = value;
+    }
+    const identityNote = text('p', '', 'muted small'); identity.append(identityFields, identityNote); $('ingress-form').append(identity);
+    function clearIdentity(message = '尚未读取连接身份。') {
+      identity.open = false; identityFields.hidden = true;
+      for (const value of Object.values(identityValues)) value.value = '';
+      identityNote.textContent = message;
+    }
+    function renderIdentity(value) {
+      if (!value.configured || !Object.keys(identityValues).every(key => typeof value[key] === 'string' && value[key].trim())) { clearIdentity('连接身份未配置或不可用。'); return; }
+      for (const [key, field] of Object.entries(identityValues)) field.value = value[key];
+      identityFields.hidden = false; identityNote.textContent = '请通过可信渠道与手机显示的实例 ID 和身份公钥逐字核对；不一致时不要确认连接。';
+    }
+    clearIdentity();
     let visible = false, state = null, rows = [], dirty = false, loading = false, writing = false, sequence = 0, controller = null, timer = null, budget = 0;
     const active = () => visible && isAuthenticated() && document.visibilityState !== 'hidden';
     const note = message => { $('ingress-notice').textContent = message; };
@@ -46,6 +66,7 @@
     }
     function render(value) {
       state = value; dirty = false; rows = []; $('ingress-list').replaceChildren();
+      renderIdentity(value);
       $('ingress-enabled').checked = value.enabled === true; $('ingress-default-priority').value = String(value.default_priority || 100);
       $('ingress-canonical').textContent = value.canonical_url || '未配置公网 HTTPS Hub 地址';
       const verified = (value.endpoints || []).filter(e => e.enabled && e.status === 'verified').length;
@@ -65,7 +86,7 @@
         if (seq !== sequence || epoch !== getEpoch() || !active()) return;
         if (!Number.isSafeInteger(value.revision)) throw new Error('invalid state');
         note(''); render(value);
-      } catch { if (seq === sequence && epoch === getEpoch() && active()) { state = null; note('状态读取失败，操作已锁定，请重新读取。'); } }
+      } catch { if (seq === sequence && epoch === getEpoch() && active()) { state = null; clearIdentity('连接身份读取失败，请重新读取。'); note('状态读取失败，操作已锁定，请重新读取。'); } }
       finally { if (seq === sequence) { loading = false; controller = null; sync(); schedule(); } }
     }
     async function mutate(operation, extra = {}) {
@@ -75,7 +96,7 @@
         const value = await request('ingress/' + operation, 'POST', { expected_revision: revision, ...extra });
         if (seq !== sequence || epoch !== getEpoch() || !active()) return;
         render(value); budget = 90; note(operation === 'save' ? '入口配置已保存；新增或改址的入口需要通过验证后才可用。' : '正在逐一验证入口连接的 Hub 身份。');
-      } catch (error) { if (seq === sequence && epoch === getEpoch() && active()) { state = null; note((errors[error.message] || '未确认操作结果。') + ' 请重新读取状态，不要直接重复提交。'); } }
+      } catch (error) { if (seq === sequence && epoch === getEpoch() && active()) { state = null; clearIdentity('连接身份状态未确认，请重新读取。'); note((errors[error.message] || '未确认操作结果。') + ' 请重新读取状态，不要直接重复提交。'); } }
       finally { if (seq === sequence) { writing = false; sync(); schedule(); } }
     }
     $('ingress-form').addEventListener('submit', event => {
@@ -91,10 +112,10 @@
     $('ingress-refresh').addEventListener('click', () => { budget = 90; void refresh(); });
     function setVisible(show) {
       const changed = visible !== show; visible = show;
-      if (!show) { stop(); writing = false; state = null; dirty = false; rows = []; $('ingress-list').replaceChildren(); }
+      if (!show) { stop(); writing = false; state = null; dirty = false; rows = []; $('ingress-list').replaceChildren(); clearIdentity(); }
       if (show && changed && active()) { budget = 90; void refresh(); } sync();
     }
-    document.addEventListener('visibilitychange', () => { if (!active()) { stop(); writing = false; } else if (!dirty) void refresh(); else { state = null; note('页面恢复后请重新读取状态，再继续修改。'); sync(); } });
+    document.addEventListener('visibilitychange', () => { if (!active()) { stop(); writing = false; clearIdentity(); } else if (!dirty) void refresh(); else { state = null; note('页面恢复后请重新读取状态，再继续修改。'); sync(); } });
     return { setVisible, refresh, sync, reset: () => setVisible(false) };
   };
 })();
