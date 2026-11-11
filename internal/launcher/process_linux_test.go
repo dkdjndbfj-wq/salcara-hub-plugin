@@ -97,7 +97,14 @@ func runLockSupervisorFixture() {
 		return
 	}
 	pid, _ := json.Marshal(runner.child.cmd.Process.Pid)
-	if err = os.WriteFile(filepath.Join(dir, "ready"), pid, 0600); err != nil {
+	// Publish readiness only after the complete PID has been written and closed.
+	// A direct WriteFile to "ready" exposes an empty file between create/write,
+	// allowing the parent to observe readiness before it can decode the child.
+	readyTemp := filepath.Join(dir, "ready.tmp")
+	if err = os.WriteFile(readyTemp, pid, 0600); err == nil {
+		err = os.Rename(readyTemp, filepath.Join(dir, "ready"))
+	}
+	if err != nil {
 		_ = runner.Stop()
 		return
 	}
