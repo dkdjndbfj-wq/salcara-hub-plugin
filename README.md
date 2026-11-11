@@ -35,6 +35,7 @@ Hub 不运行大模型，也不要求用户提交中转站账号或模型 API Ke
 - 0.5.3 新增运维中心：分角色协作、可查询导出的操作审计、健康与监控接口、离线加密备份和校验恢复，见 [运维与恢复](docs/OPERATIONS-AND-RECOVERY.zh.md)。
 - 0.5.3 支持全站分别开关本站 API、外站 API、反代账号和官方账号，按完整来源地址限制远程执行，见 [远程使用授权](docs/REMOTE-SOURCE-AUTHORIZATION.zh.md)。
 - 0.5.3 支持管理员账号登录、用户档案、按用户登记和关联电脑、禁用用户及单独来源授权，见 [用户与设备管理](docs/USER-MANAGEMENT.zh.md)。手机保持原扫码流程。
+- 0.5.5 完善可信 API 自动登记、原 Hub 身份恢复、Bot 手机绑定与重置，以及持久通知；配套 Android 1.8.5 / Desktop（Bridge）1.6.7，见 [版本说明](docs/RELEASE-0.5.5.md)。
 
 远程会话、消息和 Agent 操作需要电脑在线，并以桌面端已安装、已授权的能力为准；仅部署 Hub 不会自动开放 Agent 未提供的原生桌面接口。
 
@@ -42,10 +43,10 @@ Hub 不运行大模型，也不要求用户提交中转站账号或模型 API Ke
 
 准备一台 Linux 主机、Docker Engine / Compose、自己控制的域名和 HTTPS 反向代理。支持的镜像平台为 `linux/amd64` 和 `linux/arm64`。
 
-以下安装示例以 0.5.3 为目标。执行前在 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 确认 `standalone-v0.5.3` 已正式发布且同版本镜像可拉取；源码或文档更新不代表发布完成。在本地审阅该版本脚本后执行：
+以下安装示例以 0.5.5 为目标。执行前在 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 确认 `standalone-v0.5.5` 已正式发布且同版本镜像可拉取；源码或文档更新不代表发布完成。在本地审阅该版本脚本后执行：
 
 ```sh
-git clone --branch standalone-v0.5.3 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
+git clone --branch standalone-v0.5.5 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
 cd salcara-hub
 bash deploy/standalone/install.sh \
   --public-url https://relay.example.com/salcara-hub \
@@ -62,7 +63,7 @@ bash deploy/standalone/install.sh \
 
 1. 完成 HTTPS 反代配置，打开 `https://你的域名/salcara-hub/admin/`。
 2. 在自己的安全终端或编辑器中读取安装输出指定的初始管理密钥文件，以账号 `admin`、整行密钥作为密码登录。历史 0.5.2 页面只填密钥；升级后首次使用 `admin` 和原管理密钥。设置过账号和密码后使用新值。不要把密钥放进 URL 或发给别人。
-3. 在管理页先创建用户，再为该用户生成一次性电脑登记码。在配套 Salcara 桌面 App 中填写站点根地址，例如 `https://你的域名`，首次登记时填写登记码，连接后生成配对二维码。
+3. 在配套 Salcara 桌面 App 中选择已有 API 并检查连接；站点已配置可信登记服务并明确授权时，可自动登记电脑。不支持自动登记的独立 Hub，由管理员先创建用户、生成一次性电脑登记码，再通过可信渠道交给电脑使用者。登记成功后生成配对二维码。
 4. 用 Salcara 手机 App 扫码绑定，选择电脑和 Agent，加载会话或发起任务。
 
 模型 API 由桌面 App 配置，不需要填进 Hub 后台。普通用户绑定电脑也不需要管理员密钥。
@@ -81,7 +82,7 @@ bash deploy/standalone/install.sh \
 
 0.5.3 新增独立的「版本更新」页面。使用包含新版启动器的 Docker 镜像后，服务启动时自动检查新版本，默认每 6 小时再检查一次；左上角显示当前版本，发现签名新版后版本号变色，点击即可确认更新，也可在更新页面点击「一键更新」。页面显示当前版本、最新版本、最近检查和下次检查时间，也可随时手动检查。
 
-一键更新安装签名验证后的 Hub 程序，保留管理密钥、设备绑定和持久数据，重启后需要重新登录。Docker 基础镜像和启动器通过 Compose 升级；已有安装首次启用后台定时检查，需要切换到包含新启动器的已发布镜像。仓库代码不代表正式镜像已经发布。所有升级、恢复和卸载都应先备份，保留原项目与数据卷。检测周期与部署步骤见 [更新与资源](docs/STANDALONE-DOCKER.zh.md#更新与资源)。
+一键更新安装签名验证后的 Hub 程序，保留管理密钥、设备绑定和持久数据，重启后需要重新登录。Docker 基础镜像和启动器通过 Compose 升级；已有安装首次启用后台定时检查，需要切换到包含新启动器的已发布镜像。仓库代码不代表正式镜像已经发布，发布也不会自动重启已部署的 Hub。所有升级、恢复和卸载都应先备份，保留原项目与完整数据卷；不要用旧备份恢复已撤销的权限。检测周期与部署步骤见 [更新与资源](docs/STANDALONE-DOCKER.zh.md#更新与资源)。
 
 - [部署、升级、恢复密钥与卸载](docs/STANDALONE-DOCKER.zh.md)
 - [交给 Agent 部署](docs/AGENT-DEPLOY.zh.md)

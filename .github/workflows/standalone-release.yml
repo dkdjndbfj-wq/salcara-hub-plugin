@@ -5,7 +5,7 @@ on:
       version:
         description: Bare stable version, matching the standalone release tag
         required: true
-        default: '0.5.4'
+        default: '0.5.5'
       publish_image:
         description: Publish the tested image to GHCR (does not deploy a server)
         type: boolean
@@ -72,7 +72,7 @@ jobs:
           bash -n deploy/standalone/install.sh deploy/standalone/create-bot-binding.sh deploy/standalone/resume-bot.sh deploy/standalone/install.test.sh deploy/standalone/bot-deploy.test.sh
           bash deploy/standalone/install.test.sh
           bash deploy/standalone/bot-deploy.test.sh
-          node --test deploy/standalone/*.test.mjs
+          node --test deploy/standalone/*.test.mjs internal/standalone/*.test.mjs
       - name: Build one immutable multiarch OCI archive with provenance and SBOM
         id: image
         uses: docker/build-push-action@v6

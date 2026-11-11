@@ -92,6 +92,7 @@ try {
   docker(['exec', container, '/salcara-hub-launcher', '-healthcheck']);
   const health = await (await request('/healthz')).json();
   assert.equal(health.product, 'salcara-hub-standalone', 'must not run another edition');
+  assert.equal(health.version, config.Labels['org.opencontainers.image.version']);
   assert.equal((await request('/salcara-hub/v1/ping')).status, 200);
   assert.equal((await request('/v1/ping')).status, 404, 'must not claim model API /v1');
   const page = await request('/salcara-hub/admin/');
@@ -100,7 +101,17 @@ try {
   assert.match(page.headers.get('content-security-policy') || '', /frame-ancestors 'self'/);
   const publicStatusPage = await request('/salcara-hub/status');
   assert.equal(publicStatusPage.status, 200);
-  assert.match(await publicStatusPage.text(), /status\.js/);
+  const publicStatusMarkup = await publicStatusPage.text();
+  assert.match(publicStatusMarkup, /status\.js/);
+  const pairedVersions = JSON.parse(readFileSync(new URL('../../internal/standalone/web/client-versions.json', import.meta.url), 'utf8'));
+  const publicHome = await request('/salcara-hub/');
+  assert.equal(publicHome.status, 200);
+  for (const markup of [await publicHome.text(), publicStatusMarkup]) {
+    assert.ok(!markup.includes('{{MOBILE_CLIENT_VERSION}}') && !markup.includes('{{BRIDGE_CLIENT_VERSION}}'));
+    for (const client of ['mobile', 'bridge']) {
+      assert.ok(markup.includes(`data-client-version="${client}">v${pairedVersions[client]}<`), `${client} public version must match the release manifest`);
+    }
+  }
   const publicStatus = await request('/salcara-hub/statusz');
   assert.equal(publicStatus.status, 200);
   assert.match(publicStatus.headers.get('content-type') || '', /^application\/json(?:;|$)/);

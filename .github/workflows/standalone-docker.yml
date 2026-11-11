@@ -46,7 +46,7 @@ jobs:
           bash deploy/standalone/install.test.sh
           bash deploy/standalone/bot-deploy.test.sh
       - name: Test public and administrator UI, permissions, and release tooling
-        run: node --test deploy/standalone/*.test.mjs
+        run: node --test deploy/standalone/*.test.mjs internal/standalone/*.test.mjs
       - name: Build amd64 (tests and vet run inside the builder)
         run: docker buildx build --platform linux/amd64 --load --tag salcara-hub-standalone:ci .
       - name: Run isolated non-root container smoke test
