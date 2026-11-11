@@ -1,5 +1,12 @@
 # Remote source issuer contract
 
+Device enrollment has a separate opt-in v1 protocol in the next-source
+implementation; see [Station source issuer service](SOURCE-ISSUER-SERVICE-20261015.md#opt-in-device-enrollment-v1).
+The command-bound `SourceSnapshot` below cannot be exchanged for a new-device
+identity or QR phone authorization. An existing command issuer is not
+implicitly trusted to enroll devices, and its request/response formats remain
+unchanged.
+
 The Hub verifies short-lived, command-bound Ed25519 grants. This repository
 does not implement a Sub2API account verifier or certify a local account by
 its editable name, `SourceType`, `ProviderID`, a successful `/models` request,

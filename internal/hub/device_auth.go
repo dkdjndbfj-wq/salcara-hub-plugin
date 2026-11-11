@@ -24,6 +24,9 @@ func accountAllowsDevice(accountID, deviceID string) bool {
 }
 
 func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ string) {
+	if !validateEnrollmentCredentials(w, r) {
+		return
+	}
 	ip := clientIP(r, h.cfg.TrustProxy)
 	var info Device
 	if !decodeBody(w, r, maxDeviceBody, &info) {
@@ -48,6 +51,12 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		return
 	}
 	accountID := deviceAccount(info.DeviceID)
+	if r.Header.Get("X-Salcara-Enrollment-Grant") != "" {
+		h.handleAPIEnrollmentRegister(w, r, info, secretHash)
+		return
+	}
+	h.enrollmentMu.Lock()
+	defer h.enrollmentMu.Unlock()
 	if invite := strings.TrimSpace(r.Header.Get("X-Salcara-Bot-Invite")); invite != "" {
 		p := BotBindingPackage{Type: botBindingType, Version: botBindingVersion, HubURL: h.cfg.PublicURL, GroupID: strings.TrimSpace(r.Header.Get("X-Salcara-Bot-Group")), Invite: invite, Signature: strings.TrimSpace(r.Header.Get("X-Salcara-Bot-Signature"))}
 		if h.cfg.DeploymentMode != "bot" || !validBotPackage(p) {
@@ -62,21 +71,22 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 			writeCodedError(w, 403, "bot_credentials_invalid", "Bot 绑定包无效或设备上限已满")
 			return
 		}
+		membershipChanged := !g.Computers[info.DeviceID]
 		st, status, deferred := h.registerDeviceLocked(accountID, info, secretHash)
 		if status == 0 {
 			g.Computers[info.DeviceID] = true
+			if membershipChanged {
+				h.accounts[accountID].devices[info.DeviceID].registrationEpoch++
+				h.notifyBotScopeChangedLocked(&botGroup{Computers: map[string]bool{info.DeviceID: true}})
+			}
 		}
 		h.mu.Unlock()
 		if status != 0 {
 			writeCodedError(w, status, deviceRegistrationFailureCode(status), "电脑登记失败")
 			return
 		}
-		if err := h.saveNowError(); err != nil {
-			writeError(w, 503, "电脑登记尚未安全保存，请稍后重试")
-			return
-		}
-		if err := h.saveBotStateError(); err != nil {
-			writeError(w, 503, "Bot 绑定尚未安全保存，请稍后重试")
+		if err := h.confirmDeviceRegistration(accountID, info.DeviceID); err != nil {
+			writeCodedError(w, 503, "remote_unavailable", "Bot 登记尚未安全保存，请稍后重试")
 			return
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st, "metadataDeferred": deferred, "groupId": g.ID, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(accountID, info.DeviceID)})
@@ -101,6 +111,10 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 			writeCodedError(w, status, deviceRegistrationFailureCode(status), "电脑身份验证失败或本站设备容量已满")
 			return
 		}
+		if err := h.confirmDeviceRegistration(accountID, info.DeviceID); err != nil {
+			writeCodedError(w, 503, "remote_unavailable", "Bot 登记尚未安全保存，请稍后重试")
+			return
+		}
 		if deferred {
 			writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st, "metadataDeferred": true, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(accountID, info.DeviceID)})
 			return
@@ -109,8 +123,6 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		writeJSON(w, 200, map[string]any{"ok": true, "account": accountID, "device": st, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(accountID, info.DeviceID)})
 		return
 	}
-	h.enrollmentMu.Lock()
-	defer h.enrollmentMu.Unlock()
 	h.mu.Lock()
 	a := h.accounts[accountID]
 	exists := a != nil && a.devices[info.DeviceID] != nil
@@ -172,8 +184,8 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 		writeCodedError(w, status, deviceRegistrationFailureCode(status), "电脑身份验证失败或本站设备容量已满")
 		return
 	}
-	if !exists && h.cfg.DataDir != "" {
-		if err := h.saveNowError(); err != nil {
+	if h.cfg.DataDir != "" {
+		if err := h.confirmDeviceRegistration(accountID, info.DeviceID); err != nil {
 			h.log.Error("new device registration persistence failed", "err", err)
 			writeError(w, http.StatusServiceUnavailable, "设备登记尚未安全保存，请稍后重试")
 			return
@@ -190,7 +202,7 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 }
 
 func validDeviceInfo(info Device) bool {
-	return validID(info.DeviceID) && len(info.Name) <= 256 && len(info.OS) <= 128 && len(info.Version) <= 128
+	return validID(info.DeviceID) && (info.ComputerID == "" || validID(info.ComputerID)) && len(info.Name) <= 256 && len(info.OS) <= 128 && len(info.Version) <= 128
 }
 
 // Registration has already separated the IP limit from admission failures.
@@ -229,6 +241,12 @@ func (h *Hub) registerDeviceLocked(acct string, info Device, secretHash [32]byte
 			subtle.ConstantTimeCompare(dev.secretHash[:], secretHash[:]) != 1 {
 			return DeviceStatus{}, 403, false
 		}
+		if dev := a.devices[info.DeviceID]; dev != nil && dev.info.ComputerID != "" {
+			if info.ComputerID != "" && info.ComputerID != dev.info.ComputerID {
+				return DeviceStatus{}, 403, false
+			}
+			info.ComputerID = dev.info.ComputerID
+		}
 		if a.devices[info.DeviceID] == nil && len(a.devices) >= maxDevices {
 			return DeviceStatus{}, 429, false
 		}
@@ -246,6 +264,8 @@ func (h *Hub) registerDeviceLocked(acct string, info Device, secretHash [32]byte
 	}
 	if a != nil {
 		if old := a.devices[info.DeviceID]; old != nil {
+			charge += enrollmentMetadataCost(old.enrollment)
+			projected += enrollmentMetadataCost(old.enrollment)
 			projected -= old.metadataBytes
 		}
 	}
@@ -271,6 +291,9 @@ func (h *Hub) registerDeviceLocked(acct string, info Device, secretHash [32]byte
 		dev = &device{}
 		a.devices[info.DeviceID] = dev
 	}
+	if !dev.hasSecret {
+		dev.registrationEpoch++
+	}
 	h.deviceMetadataBytes = projected
 	dev.metadataBytes = charge
 	dev.info, dev.secretHash, dev.hasSecret, dev.lastSeen = info, secretHash, true, nowMs()
@@ -295,7 +318,12 @@ func (h *Hub) deviceOnlyAuth(w http.ResponseWriter, r *http.Request, path, ip st
 		h.mu.Lock()
 		a := h.accounts[accountID]
 		valid := validID(id) && a != nil && a.devices[id] != nil && !a.devices[id].banned && !h.userDisabledLocked(id) && matchesDeviceSecret(a.devices[id], r)
+		pending := valid && h.deviceRegistrationPendingLocked(a.devices[id])
 		h.mu.Unlock()
+		if pending && path != "/bridge/register" {
+			writeCodedError(w, 503, "remote_unavailable", "电脑登记尚未安全保存，请使用原电脑身份重试登记")
+			return "", false
+		}
 		if valid {
 			return accountID, true
 		}

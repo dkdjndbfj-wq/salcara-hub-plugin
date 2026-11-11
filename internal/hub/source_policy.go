@@ -27,6 +27,8 @@ type SourceIssuer struct {
 	Origins          []string `json:"origins,omitempty"`
 	APIBases         []string `json:"apiBases,omitempty"`
 	AuthorizationURL string   `json:"authorizationUrl,omitempty"`
+	DeviceEnrollment bool     `json:"deviceEnrollment,omitempty"`
+	EnrollmentURL    string   `json:"enrollmentUrl,omitempty"`
 	key              ed25519.PublicKey
 }
 
@@ -165,6 +167,20 @@ func (p *RemoteAccessPolicy) normalize() error {
 		if issuer.AuthorizationURL != "" && !validAuthorizationURL(issuer.AuthorizationURL) {
 			return errors.New("invalid remote source issuer authorization URL")
 		}
+		if issuer.DeviceEnrollment {
+			endpoint, endpointErr := url.Parse(issuer.EnrollmentURL)
+			if p.Audience == "" || !validAuthorizationURL(issuer.EnrollmentURL) || endpointErr != nil || len(origins) == 0 || len(bases) == 0 || !origins[endpoint.Scheme+"://"+endpoint.Host] {
+				return errors.New("device enrollment requires exact issuer origin, API scopes and audience")
+			}
+			for base := range bases {
+				origin, _ := canonicalAPIBase(base)
+				if origin != endpoint.Scheme+"://"+endpoint.Host {
+					return errors.New("device enrollment endpoint must share the API origin")
+				}
+			}
+		} else if issuer.EnrollmentURL != "" && !validAuthorizationURL(issuer.EnrollmentURL) {
+			return errors.New("invalid device enrollment issuer URL")
+		}
 		issuer.key = ed25519.PublicKey(key)
 	}
 	// The station allowance must not silently enlarge the independent issuer
@@ -191,7 +207,7 @@ func ParseRemoteAccessPolicy(data []byte) (RemoteAccessPolicy, error) {
 			return policy, errors.New("invalid remote source issuer JSON")
 		}
 		for _, issuer := range issuers {
-			if decodeExactObject(issuer, []string{"id", "publicKey", "sourceTypes", "agentIds", "origins", "apiBases", "authorizationUrl"}, new(SourceIssuer)) != nil {
+			if decodeExactObject(issuer, []string{"id", "publicKey", "sourceTypes", "agentIds", "origins", "apiBases", "authorizationUrl", "deviceEnrollment", "enrollmentUrl"}, new(SourceIssuer)) != nil {
 				return policy, errors.New("invalid remote source issuer JSON")
 			}
 		}

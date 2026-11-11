@@ -361,6 +361,11 @@ func (h *Hub) handleBotComputerBind(w http.ResponseWriter, r *http.Request, _ st
 		writeError(w, 403, "缺少独立设备凭证")
 		return
 	}
+	// Keep first registration and membership changes serialized until both the
+	// Bot group and device identity are durably confirmed. A failed save leaves
+	// the same identity pending so a retry cannot acknowledge only RAM state.
+	h.enrollmentMu.Lock()
+	defer h.enrollmentMu.Unlock()
 	h.mu.Lock()
 	g := h.botGroupForPackageLocked(in.Binding)
 	if g == nil {
@@ -373,6 +378,7 @@ func (h *Hub) handleBotComputerBind(w http.ResponseWriter, r *http.Request, _ st
 		writeError(w, 409, "该 Bot 组已达到 8 台电脑上限")
 		return
 	}
+	membershipChanged := !g.Computers[id]
 	acct := deviceAccount(id)
 	status, code, _ := h.registerDeviceLocked(acct, in.Device, secret)
 	if code != 0 {
@@ -381,18 +387,18 @@ func (h *Hub) handleBotComputerBind(w http.ResponseWriter, r *http.Request, _ st
 		return
 	}
 	g.Computers[id] = true
+	if membershipChanged {
+		h.accounts[acct].devices[id].registrationEpoch++
+		// Only this computer's group scope changed. Ordinary reconnects and
+		// the group's other computers keep their existing stream generation.
+		h.notifyBotScopeChangedLocked(&botGroup{Computers: map[string]bool{id: true}})
+	}
 	h.mu.Unlock()
-	if err := h.saveNowError(); err != nil {
-		writeError(w, 503, "电脑登记尚未保存，请重试")
+	if err := h.confirmDeviceRegistration(acct, id); err != nil {
+		writeCodedError(w, http.StatusServiceUnavailable, "remote_unavailable", "Bot 登记尚未安全保存，请稍后重试")
 		return
 	}
-	if err := h.saveBotStateError(); err != nil {
-		writeError(w, 503, "Bot 绑定尚未保存，请重试")
-		return
-	}
-	h.mu.Lock()
-	h.notifyBotScopeChangedLocked(g)
-	h.mu.Unlock()
+	h.markDirty()
 	writeJSON(w, 200, map[string]any{"ok": true, "groupId": g.ID, "device": status, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(acct, id)})
 }
 
@@ -448,7 +454,7 @@ func (h *Hub) botDevicesLocked(g *botGroup) []DeviceStatus {
 	out := make([]DeviceStatus, 0, len(g.Computers))
 	for id := range g.Computers {
 		if a := h.accounts[deviceAccount(id)]; a != nil {
-			if d := a.devices[id]; d != nil && !d.banned && !h.userDisabledLocked(id) {
+			if d := a.devices[id]; d != nil && !d.banned && !h.userDisabledLocked(id) && !h.deviceRegistrationPendingLocked(d) {
 				out = append(out, d.status())
 			}
 		}
@@ -480,6 +486,9 @@ func (h *Hub) botAccountAndDeviceLocked(acct string, r *http.Request, deviceID s
 		if a == nil {
 			return "", nil
 		}
+		if h.deviceRegistrationPendingLocked(a.devices[deviceID]) {
+			return "", nil
+		}
 		return acct, a.devices[deviceID]
 	}
 	g := h.botGroupForTokenLocked(r)
@@ -491,7 +500,7 @@ func (h *Hub) botAccountAndDeviceLocked(acct string, r *http.Request, deviceID s
 		return "", nil
 	}
 	dev := a.devices[deviceID]
-	if dev == nil || dev.banned || h.userDisabledLocked(deviceID) {
+	if dev == nil || dev.banned || h.userDisabledLocked(deviceID) || h.deviceRegistrationPendingLocked(dev) {
 		return "", nil
 	}
 	return deviceAccount(deviceID), dev
@@ -502,7 +511,7 @@ func (h *Hub) botAccountAndDeviceLocked(acct string, r *http.Request, deviceID s
 // the group prevents two groups sharing a computer from sharing source grants.
 // It remains stable across restart, but phone revoke/rebind rotates it.
 func (h *Hub) botSourceBindingLocked(acct string, dev *device) string {
-	if dev == nil || dev.banned || h.userDisabledLocked(dev.info.DeviceID) || h.cfg.DeploymentMode != "bot" || !strings.HasPrefix(acct, "bot:") {
+	if dev == nil || dev.banned || h.userDisabledLocked(dev.info.DeviceID) || h.deviceRegistrationPendingLocked(dev) || h.cfg.DeploymentMode != "bot" || !strings.HasPrefix(acct, "bot:") {
 		return ""
 	}
 	groupID := strings.TrimPrefix(acct, "bot:")
@@ -523,6 +532,9 @@ func (h *Hub) appAuthorizedDeviceLocked(acct string, r *http.Request, deviceID s
 		return dev != nil && !dev.banned
 	}
 	a := h.accounts[acct]
+	if a != nil && h.deviceRegistrationPendingLocked(a.devices[deviceID]) {
+		return false
+	}
 	// Receipt and transient-read dispatch retain the resolved device account.
 	// Recheck the original Bot token against that exact device, not QR state.
 	if acct == deviceAccount(deviceID) && a != nil && a.devices[deviceID] != nil {

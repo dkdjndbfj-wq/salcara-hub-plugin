@@ -91,7 +91,7 @@ func (h *Hub) handlePairStatus(w http.ResponseWriter, r *http.Request, accountID
 	if a := h.accounts[accountID]; a != nil {
 		dev = a.devices[id]
 	}
-	if dev == nil || dev.banned || h.userDisabledLocked(dev.info.DeviceID) || !matchesDeviceSecret(dev, r) {
+	if dev == nil || dev.banned || h.userDisabledLocked(dev.info.DeviceID) || !h.matchesReadyDeviceSecret(dev, r) {
 		h.mu.Unlock()
 		writeError(w, 403, "电脑身份验证失败")
 		return
@@ -155,6 +155,12 @@ func matchesDeviceSecret(dev *device, r *http.Request) bool {
 	}
 	hash, ok := deviceSecret(r)
 	return ok && subtle.ConstantTimeCompare(hash[:], dev.secretHash[:]) == 1
+}
+
+// Operational requests require a committed identity; registration itself must
+// still accept its original secret to recover an earlier failed save.
+func (h *Hub) matchesReadyDeviceSecret(dev *device, r *http.Request) bool {
+	return !h.deviceRegistrationPendingLocked(dev) && matchesDeviceSecret(dev, r)
 }
 
 func pairKey(accountID, deviceID string) string { return accountID + "\x00" + deviceID }
@@ -239,7 +245,7 @@ func (h *Hub) handlePairStart(w http.ResponseWriter, r *http.Request, accountID 
 	if a != nil {
 		dev = a.devices[input.DeviceID]
 	}
-	if !matchesDeviceSecret(dev, r) || dev.banned || h.userDisabledLocked(dev.info.DeviceID) {
+	if !h.matchesReadyDeviceSecret(dev, r) || dev.banned || h.userDisabledLocked(dev.info.DeviceID) {
 		h.mu.Unlock()
 		writeError(w, http.StatusForbidden, "电脑身份验证失败")
 		return
@@ -444,7 +450,7 @@ func (h *Hub) handlePairRevoke(w http.ResponseWriter, r *http.Request, accountID
 	if a != nil {
 		dev = a.devices[input.DeviceID]
 	}
-	if !matchesDeviceSecret(dev, r) {
+	if !h.matchesReadyDeviceSecret(dev, r) {
 		h.mu.Unlock()
 		writeError(w, http.StatusForbidden, "电脑身份验证失败")
 		return

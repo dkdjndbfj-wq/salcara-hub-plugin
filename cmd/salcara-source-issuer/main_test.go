@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -55,5 +56,35 @@ func TestLoopbackListenerAddress(t *testing.T) {
 		if !loopback(address) {
 			t.Fatal("loopback listener rejected", address)
 		}
+	}
+}
+
+func TestEnrollmentPublicConfigRequiresExplicitOptInAndOmitsPrivateVerifier(t *testing.T) {
+	root := t.TempDir()
+	configPath, keyPath := filepath.Join(root, "issuer.json"), filepath.Join(root, "issuer.key")
+	hubKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{23}, ed25519.SeedSize))
+	private := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{17}, ed25519.SeedSize))
+	cfg := map[string]any{
+		"id": "station-a", "authorizationUrl": "https://station.example/source-grants", "enrollmentUrl": "https://station.example/device-enrollment",
+		"enrollmentHubs": []any{map[string]any{"audience": "hub-a", "hubInstanceId": strings.Repeat("1", 32), "identityPublicKey": base64.StdEncoding.EncodeToString(hubKey.Public().(ed25519.PublicKey))}},
+		"routes":         []any{map[string]any{"apiBase": "https://station.example", "verifierUrl": "http://127.0.0.1:1/v1/salcara-hub/key", "enrollmentVerifierUrl": "http://127.0.0.1:1/v1/salcara-hub/enrollment-identity", "groups": []any{map[string]any{"id": 7, "sourceType": "site_api", "audiences": []string{"hub-a"}, "agents": []string{"codex"}, "allowDeviceEnrollment": true}}}},
+	}
+	raw, _ := json.Marshal(cfg)
+	if err := os.WriteFile(configPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte(private), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := run([]string{"-config", configPath, "-key", keyPath, "-public-config"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var public hub.SourceIssuer
+	if json.Unmarshal(output.Bytes(), &public) != nil || !public.DeviceEnrollment || public.EnrollmentURL != "https://station.example/device-enrollment" {
+		t.Fatal("enrollment public configuration missing")
+	}
+	if strings.Contains(output.String(), private) || strings.Contains(output.String(), "127.0.0.1") || strings.Contains(output.String(), "enrollmentVerifierUrl") || strings.Contains(output.String(), "enrollmentHubs") {
+		t.Fatal("private enrollment configuration disclosed")
 	}
 }

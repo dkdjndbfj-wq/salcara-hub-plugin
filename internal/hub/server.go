@@ -21,21 +21,22 @@ import (
 
 // Hub is the HTTP handler and in-memory state of the service.
 type Hub struct {
-	push                *pushState     // FCM push to paired phones (push.go); nil-safe
-	deviceMetadataBytes int64          // guarded by mu; includes raw fields and map/identity reserves
-	deviceMetadataLimit int64          // fixed across resource modes; small test fixtures may lower it
-	cleanup             DeviceCleanup  // inactive-computer cleanup policy, guarded by mu
-	eventCacheBytes     int64          // guarded by mu
-	cacheOrder          *list.List     // least recently updated payload cache first, under mu
-	resource            ResourcePreset // guarded by mu, never mutate shared cfg live
-	cfg                 Config
-	log                 *slog.Logger
-	auth                *authenticator
-	limiter             *failLimiter
-	enrollLimiter       *failLimiter
-	routes              map[string]route
-	diagnostics         diagnosticAdmission // ephemeral; guarded by mu
-	ingress             *ingressRegistry
+	push                 *pushState     // FCM push to paired phones (push.go); nil-safe
+	deviceMetadataBytes  int64          // guarded by mu; includes raw fields and map/identity reserves
+	deviceMetadataLimit  int64          // fixed across resource modes; small test fixtures may lower it
+	cleanup              DeviceCleanup  // inactive-computer cleanup policy, guarded by mu
+	eventCacheBytes      int64          // guarded by mu
+	cacheOrder           *list.List     // least recently updated payload cache first, under mu
+	resource             ResourcePreset // guarded by mu, never mutate shared cfg live
+	cfg                  Config
+	log                  *slog.Logger
+	auth                 *authenticator
+	limiter              *failLimiter
+	enrollLimiter        *failLimiter
+	apiEnrollmentLimiter *failLimiter
+	routes               map[string]route
+	diagnostics          diagnosticAdmission // ephemeral; guarded by mu
+	ingress              *ingressRegistry
 
 	mu sync.Mutex
 	// enrollmentMu serializes first-time device admissions while their one-time
@@ -63,13 +64,14 @@ type Hub struct {
 	botGroups          map[string]*botGroup
 	// botSigningKey is persisted only in the Bot data volume and is used to
 	// sign binding package metadata. It is never included in a package.
-	botSigningKey    []byte
-	enrollmentClaims map[[32]byte]time.Time
-	enrollmentOwners map[[32]byte]string
-	managedUsers     managedUserState
-	bannedDeviceIDs  map[string]bool
-	adminAudit       []AdminAudit
-	saveMu           sync.Mutex
+	botSigningKey           []byte
+	enrollmentClaims        map[[32]byte]time.Time
+	enrollmentOwners        map[[32]byte]string
+	apiEnrollmentChallenges map[string]apiEnrollmentChallenge
+	managedUsers            managedUserState
+	bannedDeviceIDs         map[string]bool
+	adminAudit              []AdminAudit
+	saveMu                  sync.Mutex
 	// Process-local revocation epochs, guarded by mu. A failed persistence must
 	// not turn a repeated phone revoke into an apparently final 401/403.
 	pairRevocationEpoch      uint64
@@ -134,69 +136,72 @@ func New(cfg Config) (*Hub, error) {
 		}
 	}
 	h := &Hub{
-		deviceMetadataLimit: maxDeviceMetadataBytes,
-		cleanup:             DeviceCleanup{UnpairedDays: cfg.CleanupUnpairedDays, PairedDays: cfg.CleanupPairedDays},
-		cacheOrder:          list.New(),
-		resource:            resource,
-		cfg:                 cfg,
-		officialPublicKey:   officialPublic,
-		officialPrivateKey:  officialPrivate,
-		log:                 cfg.Logger,
-		auth:                newAuthenticator(&cfg),
-		limiter:             newFailLimiter(cfg.AuthFailLimit, cfg.AuthFailWindow),
-		enrollLimiter:       newFailLimiter(10, time.Minute),
-		accounts:            map[string]*account{},
-		pending:             map[string]*pendingCmd{},
-		pairCodes:           map[string]*pairAttempt{},
-		pairTickets:         map[[32]byte]string{},
-		pairTokens:          map[[32]byte]pairIdentity{},
-		botGroups:           map[string]*botGroup{},
-		enrollmentClaims:    map[[32]byte]time.Time{},
-		enrollmentOwners:    map[[32]byte]string{},
-		bannedDeviceIDs:     map[string]bool{},
-		seqBase:             time.Now().UnixMilli() * 1000,
-		done:                make(chan struct{}),
-		dirty:               make(chan struct{}, 1),
-		saverDone:           make(chan struct{}),
+		deviceMetadataLimit:     maxDeviceMetadataBytes,
+		cleanup:                 DeviceCleanup{UnpairedDays: cfg.CleanupUnpairedDays, PairedDays: cfg.CleanupPairedDays},
+		cacheOrder:              list.New(),
+		resource:                resource,
+		cfg:                     cfg,
+		officialPublicKey:       officialPublic,
+		officialPrivateKey:      officialPrivate,
+		log:                     cfg.Logger,
+		auth:                    newAuthenticator(&cfg),
+		limiter:                 newFailLimiter(cfg.AuthFailLimit, cfg.AuthFailWindow),
+		enrollLimiter:           newFailLimiter(10, time.Minute),
+		apiEnrollmentLimiter:    newFailLimiter(30, time.Minute),
+		accounts:                map[string]*account{},
+		pending:                 map[string]*pendingCmd{},
+		pairCodes:               map[string]*pairAttempt{},
+		pairTickets:             map[[32]byte]string{},
+		pairTokens:              map[[32]byte]pairIdentity{},
+		botGroups:               map[string]*botGroup{},
+		enrollmentClaims:        map[[32]byte]time.Time{},
+		enrollmentOwners:        map[[32]byte]string{},
+		apiEnrollmentChallenges: map[string]apiEnrollmentChallenge{},
+		bannedDeviceIDs:         map[string]bool{},
+		seqBase:                 time.Now().UnixMilli() * 1000,
+		done:                    make(chan struct{}),
+		dirty:                   make(chan struct{}, 1),
+		saverDone:               make(chan struct{}),
 	}
 	h.auth.cfg = &h.cfg
 	h.routes = map[string]route{
-		"/ping":                    {http.MethodGet, false, h.handlePing},
-		"/discovery/policy":        {http.MethodGet, false, h.handleDiscoveryPolicy},
-		"/ingress/manifest":        {http.MethodGet, false, h.handleIngressManifest},
-		"/ingress/identity":        {http.MethodGet, false, h.handleIngressIdentity},
-		"/device/register":         {http.MethodPost, false, h.handleDeviceRegister},
-		"/app/pair/qr":             {http.MethodPost, false, h.handleQRPair},
-		"/app/pair/revoke":         {http.MethodPost, true, h.handleAppPairRevoke},
-		"/me":                      {http.MethodGet, true, h.handleMe},
-		"/bridge/register":         {http.MethodPost, true, h.handleRegister},
-		"/bridge/stream":           {http.MethodGet, true, h.handleBridgeStream},
-		"/bridge/standby":          {http.MethodGet, true, h.handleBridgeStandby},
-		"/bridge/pair/status":      {http.MethodGet, true, h.handlePairStatus},
-		"/bridge/events":           {http.MethodPost, true, h.handleBridgeEvents},
-		"/bridge/blobs":            {"GET, POST", true, h.handleBlobs},
-		"/app/blobs":               {"GET, POST", true, h.handleBlobs},
-		"/bridge/reply":            {http.MethodPost, true, h.handleBridgeReply},
-		"/bridge/pair/start":       {http.MethodPost, true, h.handlePairStart},
-		"/bridge/pair/sync":        {http.MethodPost, true, h.handlePairSync},
-		"/bridge/pair/revoke":      {http.MethodPost, true, h.handlePairRevoke},
-		"/app/pair/confirm":        {http.MethodPost, true, h.handlePairConfirm},
-		"/app/devices":             {http.MethodGet, true, h.handleAppDevices},
-		"/app/diagnostics":         {http.MethodPost, true, h.handleAppDiagnostics},
-		"/app/stream":              {http.MethodGet, true, h.handleAppStream},
-		"/app/commands":            {http.MethodPost, true, h.handleAppCommands},
-		"/app/commands/prepare":    {http.MethodPost, true, h.handleOperationPrepare},
-		"/app/operations":          {http.MethodGet, true, h.handleOperationRead},
-		"/app/operations/ack":      {http.MethodPost, true, h.handleOperationAck},
-		"/app/source/challenge":    {http.MethodPost, true, h.handleSourceChallenge},
-		"/app/source/grant":        {http.MethodPost, true, h.handleSourceGrant},
-		"/bridge/source/challenge": {http.MethodGet, true, h.handleBridgeSourceChallenge},
-		"/app/events":              {http.MethodGet, true, h.handleAppEvents},
-		"/app/events/ack":          {http.MethodPost, true, h.handleEventAck},
-		"/app/push/register":       {http.MethodPost, true, h.handlePushRegister},
-		"/bot/computer/bind":       {http.MethodPost, false, h.handleBotComputerBind},
-		"/bot/phone/bind":          {http.MethodPost, false, h.handleBotPhoneBind},
-		"/bot/phone/revoke":        {http.MethodPost, true, h.handleBotPhoneRevoke},
+		"/ping":                        {http.MethodGet, false, h.handlePing},
+		"/discovery/policy":            {http.MethodGet, false, h.handleDiscoveryPolicy},
+		"/ingress/manifest":            {http.MethodGet, false, h.handleIngressManifest},
+		"/ingress/identity":            {http.MethodGet, false, h.handleIngressIdentity},
+		"/device/register":             {http.MethodPost, false, h.handleDeviceRegister},
+		"/device/enrollment/challenge": {http.MethodPost, false, h.handleAPIEnrollmentChallenge},
+		"/app/pair/qr":                 {http.MethodPost, false, h.handleQRPair},
+		"/app/pair/revoke":             {http.MethodPost, true, h.handleAppPairRevoke},
+		"/me":                          {http.MethodGet, true, h.handleMe},
+		"/bridge/register":             {http.MethodPost, true, h.handleRegister},
+		"/bridge/stream":               {http.MethodGet, true, h.handleBridgeStream},
+		"/bridge/standby":              {http.MethodGet, true, h.handleBridgeStandby},
+		"/bridge/pair/status":          {http.MethodGet, true, h.handlePairStatus},
+		"/bridge/events":               {http.MethodPost, true, h.handleBridgeEvents},
+		"/bridge/blobs":                {"GET, POST", true, h.handleBlobs},
+		"/app/blobs":                   {"GET, POST", true, h.handleBlobs},
+		"/bridge/reply":                {http.MethodPost, true, h.handleBridgeReply},
+		"/bridge/pair/start":           {http.MethodPost, true, h.handlePairStart},
+		"/bridge/pair/sync":            {http.MethodPost, true, h.handlePairSync},
+		"/bridge/pair/revoke":          {http.MethodPost, true, h.handlePairRevoke},
+		"/app/pair/confirm":            {http.MethodPost, true, h.handlePairConfirm},
+		"/app/devices":                 {http.MethodGet, true, h.handleAppDevices},
+		"/app/diagnostics":             {http.MethodPost, true, h.handleAppDiagnostics},
+		"/app/stream":                  {http.MethodGet, true, h.handleAppStream},
+		"/app/commands":                {http.MethodPost, true, h.handleAppCommands},
+		"/app/commands/prepare":        {http.MethodPost, true, h.handleOperationPrepare},
+		"/app/operations":              {http.MethodGet, true, h.handleOperationRead},
+		"/app/operations/ack":          {http.MethodPost, true, h.handleOperationAck},
+		"/app/source/challenge":        {http.MethodPost, true, h.handleSourceChallenge},
+		"/app/source/grant":            {http.MethodPost, true, h.handleSourceGrant},
+		"/bridge/source/challenge":     {http.MethodGet, true, h.handleBridgeSourceChallenge},
+		"/app/events":                  {http.MethodGet, true, h.handleAppEvents},
+		"/app/events/ack":              {http.MethodPost, true, h.handleEventAck},
+		"/app/push/register":           {http.MethodPost, true, h.handlePushRegister},
+		"/bot/computer/bind":           {http.MethodPost, false, h.handleBotComputerBind},
+		"/bot/phone/bind":              {http.MethodPost, false, h.handleBotPhoneBind},
+		"/bot/phone/revoke":            {http.MethodPost, true, h.handleBotPhoneRevoke},
 	}
 	if err := h.loadDevices(); err != nil {
 		return nil, err
@@ -297,8 +302,10 @@ func (h *Hub) janitor() {
 			h.auth.sweep(now)
 			h.limiter.sweep(now)
 			h.enrollLimiter.sweep(now)
+			h.apiEnrollmentLimiter.sweep(now)
 			h.mu.Lock()
 			h.sweepSourceChallengesLocked(now.Unix())
+			h.sweepAPIEnrollmentChallengesLocked(now.Unix())
 			for _, account := range h.accounts {
 				for _, dev := range account.devices {
 					if dev.standby != nil && now.UnixMilli()-dev.standbyAt > standbyTTL.Milliseconds() {
@@ -383,7 +390,7 @@ func (h *Hub) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	hd := w.Header()
 	hd.Set("Access-Control-Allow-Origin", "*")
 	hd.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	hd.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID, X-Salcara-Device-Secret, X-Salcara-Device-Id, X-Salcara-Pair-Token, X-Salcara-Bot-Token, X-Salcara-Bot-Group, X-Salcara-Bot-Invite, X-Salcara-Bot-Signature, X-Salcara-Enrollment-Claim, X-Salcara-Event-Scope")
+	hd.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID, X-Salcara-Device-Secret, X-Salcara-Device-Id, X-Salcara-Pair-Token, X-Salcara-Bot-Token, X-Salcara-Bot-Group, X-Salcara-Bot-Invite, X-Salcara-Bot-Signature, X-Salcara-Enrollment-Claim, X-Salcara-Enrollment-Grant, X-Salcara-Event-Scope")
 	hd.Set("Access-Control-Max-Age", "86400")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
@@ -637,10 +644,14 @@ func (h *Hub) handlePing(w http.ResponseWriter, r *http.Request, _ string) {
 		caps = append(caps, "ingress.signed-manifest.v1")
 	}
 	remoteAccess := h.CurrentRemoteAccessPolicy()
+	enrollmentDiscovery := h.apiEnrollmentDiscovery()
+	if enrollmentDiscovery != nil {
+		caps = append(caps, "device.enrollment.api.v1")
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "salcara-hub", "version": Version, "protocol": "salcara-remote", "protocolVersion": 1, "authModes": authModes, "capabilities": caps, "commandIdempotencyTTLSeconds": ttl,
 		"desktopCompatibility": h.desktopCompatibility(),
-		"remoteAccess":         discoveryPolicyView(remoteAccess)})
+		"remoteAccess":         discoveryPolicyView(remoteAccess), "deviceEnrollment": enrollmentDiscovery})
 }
 
 func (h *Hub) handleMe(w http.ResponseWriter, _ *http.Request, acct string) {
@@ -674,6 +685,10 @@ func (h *Hub) handleRegister(w http.ResponseWriter, r *http.Request, acct string
 		writeError(w, status, "电脑身份验证失败或本站设备容量已满")
 		return
 	}
+	if err := h.confirmDeviceRegistration(acct, d.DeviceID); err != nil {
+		writeCodedError(w, 503, "remote_unavailable", "电脑登记尚未安全保存，请稍后重试")
+		return
+	}
 	if deferred {
 		h.log.Warn("device metadata update deferred: site metadata budget full", "account", acct, "deviceId", d.DeviceID)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": acct, "device": st, "metadataDeferred": true, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(acct, d.DeviceID)})
@@ -701,7 +716,7 @@ func (h *Hub) handleBridgeStream(w http.ResponseWriter, r *http.Request, acct st
 		writeError(w, http.StatusNotFound, "这台电脑还没有登记，请先调用 /bridge/register")
 		return
 	}
-	if !matchesDeviceSecret(dev, r) {
+	if !h.matchesReadyDeviceSecret(dev, r) {
 		h.mu.Unlock()
 		writeError(w, http.StatusForbidden, "电脑身份验证失败")
 		return
@@ -873,7 +888,7 @@ func (h *Hub) handleBridgeEvents(w http.ResponseWriter, r *http.Request, acct st
 		writeError(w, http.StatusNotFound, "这台电脑还没有登记，请先调用 /bridge/register")
 		return
 	}
-	if !matchesDeviceSecret(dev, r) {
+	if !h.matchesReadyDeviceSecret(dev, r) {
 		h.mu.Unlock()
 		writeError(w, http.StatusForbidden, "电脑身份验证失败")
 		return
@@ -1008,7 +1023,7 @@ func (h *Hub) handleBridgeReply(w http.ResponseWriter, r *http.Request, acct str
 	h.mu.Lock()
 	p := h.pending[rep.CommandID]
 	if p != nil && p.account == acct && (rep.DeviceID == "" || rep.DeviceID == p.deviceID) &&
-		matchesDeviceSecret(h.accountLocked(acct).devices[p.deviceID], r) {
+		h.matchesReadyDeviceSecret(h.accountLocked(acct).devices[p.deviceID], r) {
 		delete(h.pending, rep.CommandID)
 		if dev := h.accountLocked(acct).devices[p.deviceID]; dev != nil {
 			dev.lastSeen = nowMs()

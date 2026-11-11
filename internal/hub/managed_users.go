@@ -43,6 +43,9 @@ type managedUserState struct {
 	Revision string                       `json:"revision"`
 	Users    []ManagedUser                `json:"users"`
 	Devices  map[string]managedAssignment `json:"devices"`
+	// Empty values are explicit administrative releases, retained so old device
+	// records cannot silently recreate a released source association.
+	EnrollmentSubjects map[string]string `json:"enrollmentSubjects,omitempty"`
 }
 
 type ManagedUserChange struct {
@@ -54,6 +57,7 @@ type ManagedUserChange struct {
 	Disabled         bool           `json:"disabled"`
 	Station          *StationPolicy `json:"station"`
 	DeviceRef        string         `json:"device_ref"`
+	SourceRef        string         `json:"source_ref"`
 	Reason           string         `json:"reason"`
 	Confirm          bool           `json:"confirm"`
 }
@@ -90,6 +94,14 @@ func validateManagedState(s *managedUserState) error {
 	for deviceID, assignment := range s.Devices {
 		if !validID(deviceID) || !policyID(assignment.Revision) || assignment.UserID != "" && !ids[assignment.UserID] || assignment.RevokedPair != "" && !hexHash(assignment.RevokedPair) {
 			return errors.New("用户设备归属无效")
+		}
+	}
+	if len(s.EnrollmentSubjects) > 10000 {
+		return errors.New("来源关联数量超过上限")
+	}
+	for ref, owner := range s.EnrollmentSubjects {
+		if !validPairHash(ref) || owner != "" && !ids[owner] {
+			return errors.New("来源用户关联无效")
 		}
 	}
 	return nil
@@ -226,6 +238,10 @@ func cloneManagedState(s managedUserState) managedUserState {
 	for k, v := range s.Devices {
 		out.Devices[k] = v
 	}
+	out.EnrollmentSubjects = make(map[string]string, len(s.EnrollmentSubjects))
+	for k, v := range s.EnrollmentSubjects {
+		out.EnrollmentSubjects[k] = v
+	}
 	return out
 }
 
@@ -270,7 +286,14 @@ func (h *Hub) ManagedUsersSnapshot() any {
 				}
 			}
 		}
-		rows = append(rows, map[string]any{"id": u.ID, "name": u.Name, "note": u.Note, "disabled": u.Disabled, "station": cloneStationPolicy(u.Station), "created_at": u.CreatedAt, "updated_at": u.UpdatedAt, "devices": devices, "online": online, "paired": paired})
+		associations := []string{}
+		for ref, owner := range h.managedUsers.EnrollmentSubjects {
+			if owner == u.ID {
+				associations = append(associations, ref)
+			}
+		}
+		sort.Strings(associations)
+		rows = append(rows, map[string]any{"id": u.ID, "name": u.Name, "note": u.Note, "disabled": u.Disabled, "station": cloneStationPolicy(u.Station), "created_at": u.CreatedAt, "updated_at": u.UpdatedAt, "devices": devices, "online": online, "paired": paired, "enrollment_associations": associations})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i]["name"].(string) < rows[j]["name"].(string) })
 	return map[string]any{"revision": h.managedUsers.Revision, "users": rows, "limit": 128}
@@ -280,8 +303,11 @@ func ValidateManagedUserChange(in ManagedUserChange) error {
 	if !in.Confirm || !validManagedText(in.Reason, 256, true) || credentialLike.MatchString(in.Reason) {
 		return errors.New("请填写不含密钥的操作原因并确认")
 	}
-	if in.Action != "save" && in.Action != "assign" && in.Action != "delete" {
+	if in.Action != "save" && in.Action != "assign" && in.Action != "delete" && in.Action != "release-source" {
 		return errors.New("用户操作无效")
+	}
+	if in.Action == "release-source" && (!validPairHash(in.SourceRef) || !policyID(in.ID) || in.DeviceRef != "") {
+		return errors.New("请指定准确的用户与来源关联编号")
 	}
 	return nil
 }
@@ -340,6 +366,7 @@ func (h *Hub) ApplyManagedUserChange(in ManagedUserChange) error {
 			}
 		}
 	case "assign":
+		associationChanged := false
 		_, d := h.adminDeviceLocked(in.DeviceRef)
 		if d == nil || in.ID != "" && h.managedUserLocked(in.ID) == nil {
 			return errors.New("用户或设备不存在")
@@ -347,7 +374,33 @@ func (h *Hub) ApplyManagedUserChange(in ManagedUserChange) error {
 		if h.cfg.DeploymentMode == "bot" {
 			return errors.New("Bot 设备使用整组凭据，暂不支持单台关联用户；可在设备页封禁或解除封禁")
 		}
+		if d.enrollment != nil {
+			ref := d.enrollment.subjectRef()
+			owner, known := next.EnrollmentSubjects[ref]
+			if owner != "" && owner != in.ID {
+				return errors.New("该来源账号已关联用户；请先明确解除来源关联，再调整单台归属")
+			}
+			if !known {
+				for _, account := range h.accounts {
+					for _, sibling := range account.devices {
+						if sibling.enrollment != nil && sibling.enrollment.subjectRef() == ref {
+							prior := next.Devices[sibling.info.DeviceID].UserID
+							if prior != "" && prior != in.ID {
+								return errors.New("该来源账号存在不同用户归属，请先处理关联冲突")
+							}
+						}
+					}
+				}
+			}
+			if in.ID != "" {
+				next.EnrollmentSubjects[ref] = in.ID
+				associationChanged = !known || owner != in.ID
+			}
+		}
 		if h.managedUsers.Devices[d.info.DeviceID].UserID == in.ID {
+			if associationChanged {
+				break
+			}
 			return errors.New("设备已属于所选用户")
 		}
 		assignment := managedAssignment{UserID: in.ID, Revision: "assignment-" + newID(), RevokedPair: h.managedUsers.Devices[d.info.DeviceID].RevokedPair}
@@ -357,6 +410,11 @@ func (h *Hub) ApplyManagedUserChange(in ManagedUserChange) error {
 		next.Devices[d.info.DeviceID] = assignment
 		affected[d.info.DeviceID] = true
 	case "delete":
+		for _, owner := range next.EnrollmentSubjects {
+			if owner == in.ID {
+				return errors.New("该用户仍有关联的来源账号，请先明确解除来源关联")
+			}
+		}
 		for _, a := range next.Devices {
 			if a.UserID == in.ID {
 				return errors.New("请先移出该用户的设备")
@@ -380,6 +438,11 @@ func (h *Hub) ApplyManagedUserChange(in ManagedUserChange) error {
 		if !found {
 			return errors.New("用户不存在")
 		}
+	case "release-source":
+		if h.managedUserLocked(in.ID) == nil || next.EnrollmentSubjects[in.SourceRef] != in.ID {
+			return errors.New("来源关联不存在或不属于该用户")
+		}
+		next.EnrollmentSubjects[in.SourceRef] = ""
 	default:
 		return errors.New("用户操作无效")
 	}
@@ -406,7 +469,11 @@ func (h *Hub) ApplyManagedUserChange(in ManagedUserChange) error {
 			delete(h.sourceChallenges, id)
 		}
 	}
-	h.auditLocked(AdminAudit{At: nowMs(), Action: "user-" + in.Action, DeviceRef: in.DeviceRef, Reason: in.Reason, Actor: "standalone-admin"})
+	auditRef := in.DeviceRef
+	if in.Action == "release-source" {
+		auditRef = in.SourceRef
+	}
+	h.auditLocked(AdminAudit{At: nowMs(), Action: "user-" + in.Action, DeviceRef: auditRef, Reason: in.Reason, Actor: "standalone-admin"})
 	h.markDirty()
 	return nil
 }
@@ -456,6 +523,9 @@ func (h *Hub) scopedDiscoveryPolicy(r *http.Request) (RemoteAccessPolicy, string
 		}
 		if h.userDisabledLocked(id) {
 			return RemoteAccessPolicy{}, "", "user_disabled"
+		}
+		if h.deviceRegistrationPendingLocked(a.devices[id]) {
+			return RemoteAccessPolicy{}, "", "remote_unavailable"
 		}
 		return h.userPolicyLocked(id), "device", ""
 	}

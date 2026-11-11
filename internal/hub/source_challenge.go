@@ -189,7 +189,7 @@ func (h *Hub) handleBridgeSourceChallenge(w http.ResponseWriter, r *http.Request
 	if account := h.accounts[acct]; account != nil {
 		dev = account.devices[deviceID]
 	}
-	if dev == nil || !dev.hasSecret || !matchesDeviceSecret(dev, r) {
+	if dev == nil || !dev.hasSecret || !h.matchesReadyDeviceSecret(dev, r) {
 		h.mu.Unlock()
 		sourceFailure(w, 403, "device_authorization_expired")
 		return

@@ -35,6 +35,10 @@ func (h *Hub) handleDiscoveryPolicy(w http.ResponseWriter, r *http.Request, _ st
 	}
 	p, scope, code := h.scopedDiscoveryPolicy(r)
 	if code != "" {
+		if code == "remote_unavailable" {
+			writeCodedError(w, http.StatusServiceUnavailable, code, "电脑登记尚未安全保存，请使用原电脑身份重试登记")
+			return
+		}
 		if code == "user_disabled" {
 			writeManagedUserDisabled(w)
 			return

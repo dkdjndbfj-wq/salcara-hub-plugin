@@ -284,7 +284,7 @@ func (h *Hub) handleBlobs(w http.ResponseWriter, r *http.Request, acct string) {
 	if bridge {
 		h.mu.Lock()
 		if a := h.accounts[acct]; a != nil {
-			if d := a.devices[deviceID]; d != nil && !d.banned && matchesDeviceSecret(d, r) && (d.bindingID == "" || d.hasPair && r.Header.Get("X-Salcara-Binding-Id") == d.bindingID && r.Header.Get("X-Salcara-Phone-Hash") == d.phoneHash) {
+			if d := a.devices[deviceID]; d != nil && !d.banned && h.matchesReadyDeviceSecret(d, r) && (d.bindingID == "" || d.hasPair && r.Header.Get("X-Salcara-Binding-Id") == d.bindingID && r.Header.Get("X-Salcara-Phone-Hash") == d.phoneHash) {
 				if !h.eventScopeMatchesLocked(acct, d, r.Header.Get("X-Salcara-Event-Scope")) {
 					h.mu.Unlock()
 					writeEventScopeChanged(w)

@@ -23,13 +23,14 @@ import (
 var requestID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 type Service struct {
-	cfg      Config
-	key      ed25519.PrivateKey
-	http     *http.Client
-	path     string
-	capacity chan struct{}
-	mu       sync.Mutex
-	attempts map[[32]byte]attempt
+	cfg            Config
+	key            ed25519.PrivateKey
+	http           *http.Client
+	path           string
+	enrollmentPath string
+	capacity       chan struct{}
+	mu             sync.Mutex
+	attempts       map[[32]byte]attempt
 }
 
 type attempt struct {
@@ -62,13 +63,18 @@ func New(cfg Config, privateKey ed25519.PrivateKey, transport http.RoundTripper)
 		return nil, errConfig
 	}
 	u, _ := url.Parse(cfg.AuthorizationURL)
+	enrollmentPath := ""
+	if owned.EnrollmentURL != "" {
+		u, _ := url.Parse(owned.EnrollmentURL)
+		enrollmentPath = u.Path
+	}
 	if transport == nil {
 		t := http.DefaultTransport.(*http.Transport).Clone()
 		// Station credentials must not follow ambient HTTP(S)_PROXY settings.
 		t.Proxy = nil
 		transport = t
 	}
-	return &Service{cfg: owned, key: append(ed25519.PrivateKey(nil), privateKey...), path: u.Path,
+	return &Service{cfg: owned, key: append(ed25519.PrivateKey(nil), privateKey...), path: u.Path, enrollmentPath: enrollmentPath,
 		http:     &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		capacity: make(chan struct{}, 32), attempts: map[[32]byte]attempt{}}, nil
 }
@@ -118,7 +124,8 @@ func (s *Service) allow(key string, now time.Time) bool {
 }
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != s.path || r.URL.RawPath != "" || r.URL.RawQuery != "" || r.URL.ForceQuery {
+	deviceEnrollment := s.enrollmentPath != "" && r.URL.Path == s.enrollmentPath
+	if r.URL.Path != s.path && !deviceEnrollment || r.URL.RawPath != "" || r.URL.RawQuery != "" || r.URL.ForceQuery {
 		failure(w, 404, "issuer_not_found")
 		return
 	}
@@ -144,11 +151,19 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = controller.SetReadDeadline(time.Now().Add(8 * time.Second))
 	defer controller.SetReadDeadline(time.Time{}) //nolint:errcheck
 	// Snapshot plus a 4096-byte credential, including JSON escape expansion.
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, hub.MaxSignedSourceGrantBytes))
+	limit := int64(hub.MaxSignedSourceGrantBytes)
+	if deviceEnrollment {
+		limit = 48 << 10
+	}
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		_ = r.Body.Close()
 		w.Header().Set("Connection", "close")
 		failure(w, 400, "issuer_request_invalid")
+		return
+	}
+	if deviceEnrollment {
+		s.serveEnrollment(w, r, raw)
 		return
 	}
 	var envelope struct {

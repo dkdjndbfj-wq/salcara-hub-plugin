@@ -32,7 +32,7 @@ func (h *Hub) handlePairSync(w http.ResponseWriter, r *http.Request, accountID s
 	if a := h.accounts[accountID]; a != nil {
 		dev = a.devices[in.DeviceID]
 	}
-	if dev == nil || dev.banned || !matchesDeviceSecret(dev, r) {
+	if dev == nil || dev.banned || !h.matchesReadyDeviceSecret(dev, r) {
 		h.mu.Unlock()
 		writeError(w, 403, "电脑身份验证失败")
 		return

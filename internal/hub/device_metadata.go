@@ -52,6 +52,13 @@ func metadataValues(raw []byte) (int64, error) {
 					return errors.New("duplicate device metadata JSON field")
 				}
 				keys[name] = true
+				if depth == 0 && name == "registrationPending" {
+					var flag json.RawMessage
+					if d.Decode(&flag) != nil || !bytes.Equal(flag, []byte("true")) && !bytes.Equal(flag, []byte("false")) {
+						return errors.New("invalid pending registration flag")
+					}
+					continue
+				}
 			}
 			if err := walk(depth + 1); err != nil {
 				return err
@@ -109,7 +116,7 @@ func prepareDeviceMetadata(info Device) (Device, int64, error) {
 	}
 	// Raw and encoded copies, identity/map overhead, and conservatively charged
 	// decoded collection slots all share the same global admission budget.
-	raw := len(info.DeviceID) + len(info.Name) + len(info.OS) + len(info.Version) + len(info.Tools) + len(info.Projects)
+	raw := len(info.DeviceID) + len(info.ComputerID) + len(info.Name) + len(info.OS) + len(info.Version) + len(info.Tools) + len(info.Projects)
 	for _, capability := range info.Capabilities {
 		raw += len(capability)
 	}
@@ -124,7 +131,7 @@ func decodeStoredRecord(raw []byte, target any) error {
 	var fields map[string]bool
 	switch target.(type) {
 	case *persistedDevice:
-		fields = map[string]bool{"device": true, "lastSeen": true, "secretHash": true, "pairHash": true, "phoneHash": true, "bindingId": true, "pairAttemptId": true, "banned": true, "banReason": true, "bannedAt": true}
+		fields = map[string]bool{"device": true, "lastSeen": true, "secretHash": true, "pairHash": true, "phoneHash": true, "bindingId": true, "pairAttemptId": true, "banned": true, "banReason": true, "bannedAt": true, "enrollment": true, "registrationPending": true}
 	case *AdminAudit:
 		fields = map[string]bool{"at": true, "action": true, "device_ref": true, "reason": true, "actor": true}
 	case *persistedEnrollmentClaim:
@@ -165,7 +172,10 @@ func decodeStoredRecord(raw []byte, target any) error {
 				keys[name] = true
 				childString = depth == 0 && (name == "secretHash" || name == "pairHash" || name == "phoneHash" || name == "bindingId" || name == "pairAttemptId" || name == "hash")
 				if depth == 0 && name == "device" {
-					childFields = map[string]bool{"deviceId": true, "name": true, "os": true, "version": true, "tools": true, "projects": true, "capabilities": true}
+					childFields = map[string]bool{"deviceId": true, "computerId": true, "name": true, "os": true, "version": true, "tools": true, "projects": true, "capabilities": true}
+				}
+				if depth == 0 && name == "enrollment" {
+					childFields = map[string]bool{"version": true, "issuer": true, "subject": true, "groupId": true, "apiBase": true, "requestId": true, "challengeId": true, "enrolledAt": true}
 				}
 			}
 			if err := walk(depth+1, childFields, childString); err != nil {
@@ -206,6 +216,7 @@ func decodeDevicesState(raw []byte, limit int64) (persistedState, int64, error) 
 		return decodeStoredRecord(value, target)
 	}
 	var charged int64
+	enrollmentRequests := map[string]bool{}
 	if err := expect('{'); err != nil {
 		return st, 0, err
 	}
@@ -251,7 +262,7 @@ func decodeDevicesState(raw []byte, limit int64) (persistedState, int64, error) 
 						break
 					}
 					var pd persistedDevice
-					if err = decodeBounded(maxDeviceBody+4096, &pd); err != nil {
+					if err = decodeBounded(maxDeviceBody+(12<<10), &pd); err != nil {
 						break
 					}
 					var charge int64
@@ -262,6 +273,22 @@ func decodeDevicesState(raw []byte, limit int64) (persistedState, int64, error) 
 					}
 					if pd.SecretHash != "" && !hexHash(pd.SecretHash) || pd.PairHash != "" && !hexHash(pd.PairHash) || pd.PhoneHash != "" && !validPairHash(pd.PhoneHash) || pd.BindingID != "" && !validPairHash(pd.BindingID) || pd.PairAttemptID != "" && !validPairHash(pd.PairAttemptID) || pd.PairHash != "" && pd.BindingID != "" && pd.PhoneHash == "" {
 						err = errors.New("invalid persisted device credential hash")
+						break
+					}
+					if pd.Enrollment != nil && (pd.SecretHash == "" || id != deviceAccount(pd.Device.DeviceID) || !pd.Enrollment.valid()) {
+						err = errors.New("invalid persisted device enrollment identity")
+						break
+					}
+					if pd.Enrollment != nil {
+						if enrollmentRequests[pd.Enrollment.RequestID] {
+							err = errors.New("duplicate persisted enrollment request")
+							break
+						}
+						enrollmentRequests[pd.Enrollment.RequestID] = true
+						charge += enrollmentMetadataCost(pd.Enrollment)
+					}
+					if pd.RegistrationPending && pd.SecretHash == "" {
+						err = errors.New("pending registration has no credential")
 						break
 					}
 					charged += charge

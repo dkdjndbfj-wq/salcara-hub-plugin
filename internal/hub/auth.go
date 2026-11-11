@@ -115,7 +115,12 @@ func (a *authenticator) query(key string) (authVerdict, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Accept", "application/json")
-	resp, err := a.cfg.HTTPClient.Do(req)
+	// A station credential belongs only to this exact configured verifier.
+	// Copy the client so its transport, timeout and cookie jar are preserved,
+	// without changing the caller's client or consulting its redirect hook.
+	client := *a.cfg.HTTPClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
 		return authInvalid, errUpstream
 	}

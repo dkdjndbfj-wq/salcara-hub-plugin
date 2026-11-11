@@ -11,12 +11,14 @@ import (
 // Device is what the bridge registers (PROTOCOL.md §2). Tools and projects are
 // kept as raw JSON so newer bridges can add fields without a hub upgrade.
 type Device struct {
-	DeviceID string          `json:"deviceId"`
-	Name     string          `json:"name"`
-	OS       string          `json:"os"`
-	Version  string          `json:"version"`
-	Tools    json.RawMessage `json:"tools"`
-	Projects json.RawMessage `json:"projects"`
+	DeviceID string `json:"deviceId"`
+	// Matching metadata only; control still requires the exact device credential.
+	ComputerID string          `json:"computerId,omitempty"`
+	Name       string          `json:"name"`
+	OS         string          `json:"os"`
+	Version    string          `json:"version"`
+	Tools      json.RawMessage `json:"tools"`
+	Projects   json.RawMessage `json:"projects"`
 	// Capabilities is a small protocol-level feature list, separate from
 	// Agent tools. Older Bridges omit it and therefore cannot execute under a
 	// restricted source policy.
@@ -150,27 +152,30 @@ type bridgeConn struct {
 func (c *bridgeConn) close() { c.once.Do(func() { close(c.closed) }) }
 
 type device struct {
-	metadataBytes     int64 // conservative retained/decoded metadata charge, guarded by Hub.mu
-	info              Device
-	lastSeen          int64
-	conn              *bridgeConn // nil while offline
-	standby           *bridgeConn // handover only; never reports this station online
-	standbyAt         int64
-	standbyComputerID string
-	secretHash        [32]byte
-	hasSecret         bool
-	pairHash          [32]byte
-	hasPair           bool
-	pairPending       bool // credential not published until persistence completes; guarded by Hub.mu
-	pairRevision      int64
-	phoneHash         string
-	bindingID         string
-	pairAttemptID     string
-	lastAppSeen       int64 // last request from the paired phone (memory only); push waits while it is active
-	banned            bool
-	banReason         string
-	bannedAt          int64
-	latency           latencyState
+	enrollment             *deviceEnrollmentIdentity
+	registrationEpoch      uint64
+	savedRegistrationEpoch uint64
+	metadataBytes          int64 // conservative retained/decoded metadata charge, guarded by Hub.mu
+	info                   Device
+	lastSeen               int64
+	conn                   *bridgeConn // nil while offline
+	standby                *bridgeConn // handover only; never reports this station online
+	standbyAt              int64
+	standbyComputerID      string
+	secretHash             [32]byte
+	hasSecret              bool
+	pairHash               [32]byte
+	hasPair                bool
+	pairPending            bool // credential not published until persistence completes; guarded by Hub.mu
+	pairRevision           int64
+	phoneHash              string
+	bindingID              string
+	pairAttemptID          string
+	lastAppSeen            int64 // last request from the paired phone (memory only); push waits while it is active
+	banned                 bool
+	banReason              string
+	bannedAt               int64
+	latency                latencyState
 }
 
 func (d *device) status() DeviceStatus {

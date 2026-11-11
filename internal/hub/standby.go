@@ -24,7 +24,7 @@ func (h *Hub) handleBridgeStandby(w http.ResponseWriter, r *http.Request, acct s
 	if a != nil {
 		dev = a.devices[id]
 	}
-	if dev == nil || dev.banned || h.userDisabledLocked(dev.info.DeviceID) || !matchesDeviceSecret(dev, r) {
+	if dev == nil || dev.banned || h.userDisabledLocked(dev.info.DeviceID) || !h.matchesReadyDeviceSecret(dev, r) {
 		h.mu.Unlock()
 		writeError(w, 403, "电脑身份验证失败")
 		return
