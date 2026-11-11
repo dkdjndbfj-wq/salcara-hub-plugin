@@ -4,6 +4,7 @@ FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS verify
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+COPY internal/enrollment ./internal/enrollment
 COPY internal/hub ./internal/hub
 COPY internal/edgepool ./internal/edgepool
 COPY internal/hostfleet ./internal/hostfleet

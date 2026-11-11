@@ -63,6 +63,15 @@ test('release configuration preserves the Hub product and public update identity
   assert.match(source, /\bProduct\s*=\s*"salcara-hub-standalone"/);
 });
 
+test('standalone Docker includes the shared enrollment protocol package', () => {
+  const dockerfile = readFileSync(new URL('../../Dockerfile', import.meta.url), 'utf8');
+  const allowlist = readFileSync(new URL('../../.dockerignore', import.meta.url), 'utf8');
+  assert.match(dockerfile, /^COPY internal\/enrollment \.\/internal\/enrollment\r?$/m);
+  assert.match(allowlist, /^!internal\/enrollment\/\r?$/m);
+  assert.match(allowlist, /^!internal\/enrollment\/\*\*\r?$/m);
+  assert.match(allowlist, /^\*\*\/secrets\/\*\*\r?$/m);
+});
+
 test('public verifier fails closed on mismatched publisher without a private key', t => {
   const dir = fixture(t);
   const identityPath = join(dir, 'public.json');

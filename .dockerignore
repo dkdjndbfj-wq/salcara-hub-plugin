@@ -13,6 +13,8 @@
 !cmd/salcara-edge/
 !cmd/salcara-edge/**
 !internal/
+!internal/enrollment/
+!internal/enrollment/**
 !internal/hub/
 !internal/hub/**
 !internal/standalone/
