@@ -17,6 +17,24 @@ import (
 // 96 MiB worker budget. 16-bit PNGs remain valid originals but are not decoded
 // for a preview. This is a bound by construction, not an RSS measurement.
 func (s *durableStore) thumbnail(scope, id string) ([]byte, error) {
+	return s.thumbnailGuarded(scope, id, nil)
+}
+
+// guard owns the caller's authorization lock, outside the durable mutex.
+// Decoding and SQL preflight reads remain outside that lock; every cache or
+// lease mutation is checked again immediately before it is committed.
+func (s *durableStore) thumbnailGuarded(scope, id string, guard func(func() error) error) ([]byte, error) {
+	mutate := func(action func() error) error {
+		locked := func() error {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return action()
+		}
+		if guard != nil {
+			return guard(locked)
+		}
+		return locked()
+	}
 	s.mu.Lock()
 	info, state, err := s.blobInfo(scope, id)
 	if err != nil || state != "ready" || !s.blobRetainedLocked(scope, id, info.ExpiresAt) {
@@ -27,10 +45,13 @@ func (s *durableStore) thumbnail(scope, id string) ([]byte, error) {
 	err = s.db.QueryRow(`SELECT body FROM thumbnails WHERE scope=? AND id=? AND expires>?`, scope, id, nowMs()).Scan(&cached)
 	if err == nil {
 		data, e := s.open(cached, "thumbnail:"+scope+":"+id)
-		if e == nil {
-			_, e = s.db.Exec(`UPDATE thumbnails SET accessed=?,expires=? WHERE id=?`, nowMs(), nowMs()+7*durableDay, id)
-		}
 		s.mu.Unlock()
+		if e == nil {
+			e = mutate(func() error {
+				_, err := s.db.Exec(`UPDATE thumbnails SET accessed=?,expires=? WHERE id=? AND scope=?`, nowMs(), nowMs()+7*durableDay, id, scope)
+				return err
+			})
+		}
 		return data, e
 	}
 	s.mu.Unlock()
@@ -40,7 +61,10 @@ func (s *durableStore) thumbnail(scope, id string) ([]byte, error) {
 	default:
 		return nil, errStorageCapacity
 	}
-	if _, err = s.db.Exec(`UPDATE blobs SET lease=MAX(lease,?) WHERE scope=? AND id=? AND state='ready'`, nowMs()+int64(2*time.Minute/time.Millisecond), scope, id); err != nil {
+	if err = mutate(func() error {
+		_, err := s.db.Exec(`UPDATE blobs SET lease=MAX(lease,?) WHERE scope=? AND id=? AND state='ready'`, nowMs()+int64(2*time.Minute/time.Millisecond), scope, id)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	reader, err := s.blobReader(scope, id)
@@ -96,39 +120,40 @@ func (s *durableStore) thumbnail(scope, id string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	globalLimit := s.policy.GlobalBytes / 20
-	if globalLimit > 128<<20 {
-		globalLimit = 128 << 20
-	}
-	bindingLimit := int64(32 << 20)
-	for {
-		var all, owned int64
-		err = s.db.QueryRow(`SELECT COALESCE(SUM(bytes),0),COALESCE(SUM(CASE WHEN scope=? THEN bytes ELSE 0 END),0) FROM thumbnails`, scope).Scan(&all, &owned)
-		if err != nil {
-			return nil, err
+	err = mutate(func() error {
+		globalLimit := s.policy.GlobalBytes / 20
+		if globalLimit > 128<<20 {
+			globalLimit = 128 << 20
 		}
-		if all+int64(len(ciphertext)) <= globalLimit && owned+int64(len(ciphertext)) <= bindingLimit {
-			break
+		bindingLimit := int64(32 << 20)
+		for {
+			var all, owned int64
+			err = s.db.QueryRow(`SELECT COALESCE(SUM(bytes),0),COALESCE(SUM(CASE WHEN scope=? THEN bytes ELSE 0 END),0) FROM thumbnails`, scope).Scan(&all, &owned)
+			if err != nil {
+				return err
+			}
+			if all+int64(len(ciphertext)) <= globalLimit && owned+int64(len(ciphertext)) <= bindingLimit {
+				break
+			}
+			query := `SELECT id FROM thumbnails ORDER BY accessed LIMIT 1`
+			args := []any{}
+			if owned+int64(len(ciphertext)) > bindingLimit {
+				query = `SELECT id FROM thumbnails WHERE scope=? ORDER BY accessed LIMIT 1`
+				args = append(args, scope)
+			}
+			var victim string
+			if err = s.db.QueryRow(query, args...).Scan(&victim); err != nil {
+				return errStorageCapacity
+			}
+			if _, err = s.db.Exec(`DELETE FROM thumbnails WHERE id=?`, victim); err != nil {
+				return err
+			}
 		}
-		query := `SELECT id FROM thumbnails ORDER BY accessed LIMIT 1`
-		args := []any{}
-		if owned+int64(len(ciphertext)) > bindingLimit {
-			query = `SELECT id FROM thumbnails WHERE scope=? ORDER BY accessed LIMIT 1`
-			args = append(args, scope)
+		if err = s.capacityLocked(scope, int64(len(ciphertext))); err != nil {
+			return err
 		}
-		var victim string
-		if err = s.db.QueryRow(query, args...).Scan(&victim); err != nil {
-			return nil, errStorageCapacity
-		}
-		if _, err = s.db.Exec(`DELETE FROM thumbnails WHERE id=?`, victim); err != nil {
-			return nil, err
-		}
-	}
-	if err = s.capacityLocked(scope, int64(len(ciphertext))); err != nil {
-		return nil, err
-	}
-	_, err = s.db.Exec(`INSERT INTO thumbnails(id,scope,body,bytes,accessed,expires) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body,bytes=excluded.bytes,accessed=excluded.accessed,expires=excluded.expires`, id, scope, ciphertext, len(ciphertext), nowMs(), nowMs()+7*durableDay)
+		_, err = s.db.Exec(`INSERT INTO thumbnails(id,scope,body,bytes,accessed,expires) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body,bytes=excluded.bytes,accessed=excluded.accessed,expires=excluded.expires`, id, scope, ciphertext, len(ciphertext), nowMs(), nowMs()+7*durableDay)
+		return err
+	})
 	return data, err
 }

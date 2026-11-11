@@ -302,13 +302,32 @@ func (h *Hub) registerDeviceLocked(acct string, info Device, secretHash [32]byte
 }
 
 func (h *Hub) deviceOnlyAuth(w http.ResponseWriter, r *http.Request, path, ip string) (string, bool) {
-	if strings.HasPrefix(path, "/bot/") || strings.HasPrefix(path, "/app/") {
+	if len(r.Header.Values("X-Salcara-Bot-Token")) > 0 {
+		// A Bot credential selects exactly one authentication mode. In
+		// particular, an unavailable/revoked Bot phone must not fall through
+		// to a simultaneously supplied QR or legacy credential.
+		if !validBotOnlyHeaders(r) {
+			writeCodedError(w, http.StatusBadRequest, "ambiguous_credentials", "请只使用一组 Bot 手机凭据")
+			return "", false
+		}
 		h.mu.Lock()
-		if g := h.botGroupForTokenLocked(r); g != nil {
-			h.mu.Unlock()
+		pending := h.botPhonePendingForRequestLocked(r)
+		g := h.botGroupForTokenLocked(r)
+		h.mu.Unlock()
+		if pending {
+			writeBotPhonePending(w, "bot_phone_revoke_pending")
+			return "", false
+		}
+		if g != nil && (strings.HasPrefix(path, "/bot/") || strings.HasPrefix(path, "/app/")) {
 			return "bot:" + g.ID, true
 		}
-		h.mu.Unlock()
+		if h.limiter.blocked(ip) {
+			writeCodedError(w, http.StatusTooManyRequests, "remote_rate_limited", "身份验证失败次数过多")
+			return "", false
+		}
+		h.limiter.fail(ip)
+		writeCodedError(w, http.StatusForbidden, "bot_credentials_invalid", "Bot 手机凭据已失效")
+		return "", false
 	}
 	// Valid credentials are checked first: failures by someone else behind the
 	// same proxy address must never lock out paired phones and computers.
@@ -361,6 +380,29 @@ func (h *Hub) deviceOnlyAuth(w http.ResponseWriter, r *http.Request, path, ip st
 	}
 	writeCodedError(w, 403, code, "设备凭证或手机绑定已失效，请重新扫码绑定")
 	return "", false
+}
+
+// A request may have authenticated before a revoke began and then waited for
+// an event or a storage lock. Preserve the pending/retired distinction at its
+// final authorization check too. A valid token with a wrong target is not a
+// revoked credential and must retain the caller's ordinary denial response.
+func (h *Hub) writeBotPhoneUnavailable(w http.ResponseWriter, r *http.Request) bool {
+	if len(r.Header.Values("X-Salcara-Bot-Token")) == 0 {
+		return false
+	}
+	h.mu.Lock()
+	pending := h.botPhonePendingForRequestLocked(r)
+	active := h.botGroupForTokenLocked(r) != nil
+	h.mu.Unlock()
+	if pending {
+		writeBotPhonePending(w, "bot_phone_revoke_pending")
+		return true
+	}
+	if !active {
+		writeCodedError(w, http.StatusForbidden, "bot_credentials_invalid", "Bot 手机凭据已失效")
+		return true
+	}
+	return false
 }
 
 func (h *Hub) handleQRPair(w http.ResponseWriter, r *http.Request, _ string) {

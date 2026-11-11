@@ -38,6 +38,7 @@ func (h *Hub) maybeQueueOffline(w http.ResponseWriter, r *http.Request, acct str
 	if !allowed {
 		return false
 	}
+	callerAcct := acct
 	acct = actual
 	h.mu.Lock()
 	a := h.accounts[acct]
@@ -58,7 +59,13 @@ func (h *Hub) maybeQueueOffline(w http.ResponseWriter, r *http.Request, acct str
 		writeError(w, 400, "指令格式无效")
 		return true
 	}
-	if err = s.retainCommandBlobs(scope, req.Command, "operation:"+req.RequestID); err != nil {
+	if err = h.withAppStorageScope(callerAcct, r, req.DeviceID, scope, func() error {
+		return s.retainCommandBlobs(scope, req.Command, "operation:"+req.RequestID)
+	}); err != nil {
+		if err == errStorageAuthorization {
+			h.writeStorageAuthorizationError(w, r, "设备授权已失效")
+			return true
+		}
 		writeError(w, 503, "离线图片引用尚未保存")
 		return true
 	}
@@ -70,58 +77,73 @@ func (h *Hub) maybeQueueOffline(w http.ResponseWriter, r *http.Request, acct str
 	if code != "" || source == nil || source.Mode != "open" {
 		return false
 	}
-	if h.receipts.closed {
-		writeError(w, 503, "服务正在重启")
+	status := http.StatusAccepted
+	var out map[string]any
+	err = h.withAppStorageScope(callerAcct, r, req.DeviceID, scope, func() error {
+		if h.receipts.closed {
+			status, out = 503, map[string]any{"error": "服务正在重启"}
+			return nil
+		}
+		if entry := h.receipts.entries[key]; entry != nil {
+			if entry.Hash != shaHex(canonical) {
+				status, out = 409, map[string]any{"code": "request_id_conflict", "error": "原操作内容不一致"}
+				return nil
+			}
+			var state string
+			_ = s.db.QueryRow(`SELECT state FROM offline_queue WHERE id=?`, key).Scan(&state)
+			if state != "queued" {
+				return nil
+			}
+		} else {
+			if len(h.receipts.entries) >= maxCommandReceipts {
+				status, out = 429, map[string]any{"error": "安全操作记录已满"}
+				return nil
+			}
+			entry := &commandReceipt{durableCommandReceipt: durableCommandReceipt{Version: 2, Owner: owner, Hash: shaHex(canonical), ExpiresAt: nowMs() + 30*durableDay}, done: make(chan struct{})}
+			if err := h.receipts.persistLocked(key, entry.durableCommandReceipt); err != nil {
+				return err
+			}
+			h.receipts.entries[key] = entry
+			intent := offlineIntent{Account: acct, DeviceID: req.DeviceID, Scope: scope, Command: req.Command, Source: source}
+			raw, _ := json.Marshal(intent)
+			encrypted, e := s.seal(raw, "queue:"+key)
+			if e == nil {
+				s.mu.Lock()
+				var count, owned int
+				e = s.db.QueryRow(`SELECT COUNT(*),COUNT(CASE WHEN owner=? THEN 1 END) FROM offline_queue WHERE state='queued'`, owner).Scan(&count, &owned)
+				if e == nil && (count >= 64 || owned >= 4) {
+					e = errStorageCapacity
+				}
+				if e == nil {
+					e = s.capacityLocked(scope, int64(len(encrypted)))
+				}
+				if e == nil {
+					_, e = s.db.Exec(`INSERT INTO offline_queue(id,owner,scope,deadline,state,body,bytes) VALUES(?,?,?,?,'queued',?,?)`, key, owner, scope, deadline, encrypted, len(encrypted))
+				}
+				s.mu.Unlock()
+			}
+			if e != nil {
+				entry.completed = true
+				close(entry.done)
+				status, out = 503, map[string]any{"code": "command_delivery_uncertain", "error": "原操作未能完成登记，请查询原回执；不会重新分配身份"}
+				return nil
+			}
+		}
+		out = map[string]any{"ok": true, "state": "queued", "queued": true, "requestId": req.RequestID, "operationId": req.RequestID, "dispatchNotAfter": deadline, "storageEpoch": s.epoch}
+		return nil
+	})
+	if err == errStorageAuthorization {
+		h.writeStorageAuthorizationError(w, r, "设备授权已失效")
 		return true
 	}
-	if entry := h.receipts.entries[key]; entry != nil {
-		if entry.Hash != shaHex(canonical) {
-			writeJSON(w, 409, map[string]any{"code": "request_id_conflict", "error": "原操作内容不一致"})
-			return true
-		}
-		var state string
-		_ = s.db.QueryRow(`SELECT state FROM offline_queue WHERE id=?`, key).Scan(&state)
-		if state != "queued" {
-			return false
-		}
-	} else {
-		if len(h.receipts.entries) >= maxCommandReceipts {
-			writeError(w, 429, "安全操作记录已满")
-			return true
-		}
-		entry := &commandReceipt{durableCommandReceipt: durableCommandReceipt{Version: 2, Owner: owner, Hash: shaHex(canonical), ExpiresAt: nowMs() + 30*durableDay}, done: make(chan struct{})}
-		if err = h.receipts.persistLocked(key, entry.durableCommandReceipt); err != nil {
-			writeError(w, 503, "离线操作尚未保存")
-			return true
-		}
-		h.receipts.entries[key] = entry
-		intent := offlineIntent{Account: acct, DeviceID: req.DeviceID, Scope: scope, Command: req.Command, Source: source}
-		raw, _ := json.Marshal(intent)
-		encrypted, e := s.seal(raw, "queue:"+key)
-		if e == nil {
-			s.mu.Lock()
-			var count int
-			var owned int
-			e = s.db.QueryRow(`SELECT COUNT(*),COUNT(CASE WHEN owner=? THEN 1 END) FROM offline_queue WHERE state='queued'`, owner).Scan(&count, &owned)
-			if e == nil && (count >= 64 || owned >= 4) {
-				e = errStorageCapacity
-			}
-			if e == nil {
-				e = s.capacityLocked(scope, int64(len(encrypted)))
-			}
-			if e == nil {
-				_, e = s.db.Exec(`INSERT INTO offline_queue(id,owner,scope,deadline,state,body,bytes) VALUES(?,?,?,?,'queued',?,?)`, key, owner, scope, deadline, encrypted, len(encrypted))
-			}
-			s.mu.Unlock()
-		}
-		if e != nil {
-			entry.completed = true
-			close(entry.done)
-			writeJSON(w, 503, map[string]any{"code": "command_delivery_uncertain", "error": "原操作未能完成登记，请查询原回执；不会重新分配身份"})
-			return true
-		}
+	if err != nil {
+		writeError(w, 503, "离线操作尚未保存")
+		return true
 	}
-	writeJSON(w, 202, map[string]any{"ok": true, "state": "queued", "queued": true, "requestId": req.RequestID, "operationId": req.RequestID, "dispatchNotAfter": deadline, "storageEpoch": s.epoch})
+	if out == nil {
+		return false
+	}
+	writeJSON(w, status, out)
 	return true
 }
 

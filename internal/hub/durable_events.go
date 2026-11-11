@@ -260,6 +260,10 @@ func (s *durableStore) eventPage(scope, session string, after int64, limit int) 
 func (h *Hub) appStorageIdentity(acct string, r *http.Request, deviceID string) (string, string, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.appStorageIdentityLocked(acct, r, deviceID)
+}
+
+func (h *Hub) appStorageIdentityLocked(acct string, r *http.Request, deviceID string) (string, string, bool) {
 	actual := acct
 	var d *device
 	if strings.HasPrefix(acct, "bot:") {
@@ -276,6 +280,30 @@ func (h *Hub) appStorageIdentity(acct string, r *http.Request, deviceID string) 
 		return "", "", false
 	}
 	return actual, h.durableScopeLocked(actual, d), true
+}
+
+var errStorageAuthorization = errors.New("storage authorization changed")
+
+func (h *Hub) appStorageScopeMatchesLocked(acct string, r *http.Request, deviceID, scope string) bool {
+	_, current, ok := h.appStorageIdentityLocked(acct, r, deviceID)
+	return ok && current == scope
+}
+
+// Use only for bounded local mutations. action may acquire the durable mutex,
+// but must not acquire Hub.mu again or read/write a network stream.
+func (h *Hub) withAppStorageScope(acct string, r *http.Request, deviceID, scope string, action func() error) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.appStorageScopeMatchesLocked(acct, r, deviceID, scope) {
+		return errStorageAuthorization
+	}
+	return action()
+}
+
+func (h *Hub) writeStorageAuthorizationError(w http.ResponseWriter, r *http.Request, message string) {
+	if !h.writeBotPhoneUnavailable(w, r) {
+		writeError(w, http.StatusForbidden, message)
+	}
 }
 
 func (h *Hub) handleEventAck(w http.ResponseWriter, r *http.Request, acct string) {
@@ -295,7 +323,7 @@ func (h *Hub) handleEventAck(w http.ResponseWriter, r *http.Request, acct string
 	}
 	_, scope, ok := h.appStorageIdentity(acct, r, in.DeviceID)
 	if !ok {
-		writeError(w, 403, "设备授权已失效")
+		h.writeStorageAuthorizationError(w, r, "设备授权已失效")
 		return
 	}
 	if in.StorageEpoch != s.epoch {
@@ -306,41 +334,54 @@ func (h *Hub) handleEventAck(w http.ResponseWriter, r *http.Request, acct string
 		writeError(w, 400, "回执格式不正确")
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var head int64
 	if err := s.db.QueryRow(`SELECT last_seq FROM event_heads WHERE scope=? AND session=?`, scope, shaHex(in.SessionKey)).Scan(&head); err != nil || in.Through > head {
+		h.mu.Lock()
+		current := h.appStorageScopeMatchesLocked(acct, r, in.DeviceID, scope)
+		h.mu.Unlock()
+		if !current {
+			h.writeStorageAuthorizationError(w, r, "设备授权已失效")
+			return
+		}
 		writeError(w, 409, "确认游标超出已接收范围")
 		return
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		writeError(w, 503, "回执暂时无法保存")
+	err := h.withAppStorageScope(acct, r, in.DeviceID, scope, func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		_, err = tx.Exec(`INSERT INTO acks(scope,session,seq) VALUES(?,?,?) ON CONFLICT(scope,session) DO UPDATE SET seq=MAX(seq,excluded.seq)`, scope, shaHex(in.SessionKey), in.Through)
+		if err == nil {
+			q := `UPDATE blob_refs SET expires=MIN(expires,?) WHERE scope=? AND ref IN(SELECT 'event:' || seq FROM events WHERE scope=? AND seq<=?`
+			args := []any{nowMs() + durableDay, scope, scope, in.Through}
+			if in.SessionKey != "" {
+				q += ` AND session=?`
+				args = append(args, shaHex(in.SessionKey))
+			}
+			q += `)`
+			_, err = tx.Exec(q, args...)
+		}
+		if err == nil {
+			q := `UPDATE events SET expires=MIN(expires,?) WHERE scope=? AND seq<=?`
+			args := []any{nowMs() + durableDay, scope, in.Through}
+			if in.SessionKey != "" {
+				q += ` AND session=?`
+				args = append(args, shaHex(in.SessionKey))
+			}
+			_, err = tx.Exec(q, args...)
+		}
+		if err == nil {
+			err = tx.Commit()
+		}
+		return err
+	})
+	if errors.Is(err, errStorageAuthorization) {
+		h.writeStorageAuthorizationError(w, r, "设备授权已失效")
 		return
-	}
-	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO acks(scope,session,seq) VALUES(?,?,?) ON CONFLICT(scope,session) DO UPDATE SET seq=MAX(seq,excluded.seq)`, scope, shaHex(in.SessionKey), in.Through)
-	if err == nil {
-		q := `UPDATE blob_refs SET expires=MIN(expires,?) WHERE scope=? AND ref IN(SELECT 'event:' || seq FROM events WHERE scope=? AND seq<=?`
-		args := []any{nowMs() + durableDay, scope, scope, in.Through}
-		if in.SessionKey != "" {
-			q += ` AND session=?`
-			args = append(args, shaHex(in.SessionKey))
-		}
-		q += `)`
-		_, err = tx.Exec(q, args...)
-	}
-	if err == nil {
-		q := `UPDATE events SET expires=MIN(expires,?) WHERE scope=? AND seq<=?`
-		args := []any{nowMs() + durableDay, scope, in.Through}
-		if in.SessionKey != "" {
-			q += ` AND session=?`
-			args = append(args, shaHex(in.SessionKey))
-		}
-		_, err = tx.Exec(q, args...)
-	}
-	if err == nil {
-		err = tx.Commit()
 	}
 	if err != nil {
 		writeError(w, 503, "回执暂时无法保存")

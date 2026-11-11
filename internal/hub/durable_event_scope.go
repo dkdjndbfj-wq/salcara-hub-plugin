@@ -30,6 +30,26 @@ func (h *Hub) notifyBotScopeChangedLocked(g *botGroup) {
 	}
 	for id := range g.Computers {
 		if a := h.accounts[deviceAccount(id)]; a != nil {
+			// RAM replay has no credential-generation column. Retire it at
+			// the same boundary as the authenticated durable mailbox scope;
+			// otherwise a replacement phone can read its predecessor's SSE
+			// replay or session cache. Device accounts contain one computer.
+			for sub := range a.apps {
+				delete(a.apps, sub)
+				sub.close()
+			}
+			if a.events != nil {
+				a.events.clearCache()
+				if a.events.evictedThrough < a.seq {
+					a.events.evictedThrough = a.seq
+				}
+			}
+			a.sessions = map[string]*sessionBuf{}
+			a.sessionEvictedThrough = a.seq
+			a.eventBatches = map[string]eventBatchReceipt{}
+			a.eventBatchOrder = nil
+			a.syncCacheBytesLocked(false)
+			a.wakeEventWaitersLocked()
 			if d := a.devices[id]; d != nil {
 				if d.conn != nil {
 					d.conn.close()
@@ -37,7 +57,6 @@ func (h *Hub) notifyBotScopeChangedLocked(g *botGroup) {
 				if d.standby != nil {
 					d.standby.close()
 				}
-				a.wakeEventWaitersLocked()
 			}
 		}
 	}
@@ -52,7 +71,7 @@ func (h *Hub) hasMailboxPhoneLocked(d *device) bool {
 	}
 	if h.cfg.DeploymentMode == "bot" {
 		for _, g := range h.botGroups {
-			if g.Computers[d.info.DeviceID] && g.PhoneTokenHash != "" {
+			if g.Computers[d.info.DeviceID] && g.PhoneTokenHash != "" && !g.PhonePending {
 				return true
 			}
 		}

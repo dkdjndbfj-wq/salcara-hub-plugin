@@ -39,6 +39,7 @@ func botRequest(t *testing.T, h *Hub, method, path string, body any, headers map
 
 func TestBotBindingPackageAndPhoneLimits(t *testing.T) {
 	h, dir, hubURL := botFixture(t)
+	defer h.Close()
 	p, err := h.CreateBotBindingPackage()
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +51,7 @@ func TestBotBindingPackageAndPhoneLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	phoneID := strings.Repeat("a", 64)
-	first := botRequest(t, h, http.MethodPost, "/v1/bot/phone/bind", map[string]any{"binding": p, "phoneId": phoneID}, nil)
+	first := botRequest(t, h, http.MethodPost, "/v1/bot/phone/bind", botV2Body(p, phoneID), nil)
 	if first.Code != http.StatusOK {
 		t.Fatalf("phone bind: %d %s", first.Code, first.Body.String())
 	}
@@ -204,7 +205,7 @@ func TestBotGroupsCannotCrossReadOrCommand(t *testing.T) {
 	if err := json.Unmarshal(bindOne.Body.Bytes(), &onePhone); err != nil {
 		t.Fatal(err)
 	}
-	bindTwo := botRequest(t, h, http.MethodPost, "/v1/bot/phone/bind", map[string]any{"binding": two, "phoneId": strings.Repeat("f", 64)}, nil)
+	bindTwo := botRequest(t, h, http.MethodPost, "/v1/bot/phone/bind", botV2Body(two, strings.Repeat("f", 64)), nil)
 	if bindTwo.Code != http.StatusOK {
 		t.Fatalf("group two phone registration: %d %s", bindTwo.Code, bindTwo.Body.String())
 	}
@@ -272,26 +273,21 @@ func TestBotPhoneRevocationLeavesComputerCredentialIndependent(t *testing.T) {
 }
 
 func TestBotPhoneBindRollsBackWhenStateCannotBePersisted(t *testing.T) {
-	h, dir, _ := botFixture(t)
+	h, _, _ := botFixture(t)
 	defer h.Close()
 	p, err := h.CreateBotBindingPackage()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Point persistence at a missing parent after the invitation itself has
-	// been committed. The failed bind must not occupy the one-phone slot.
-	badDir := filepath.Join(dir, "not-a-directory")
-	if err := os.WriteFile(badDir, []byte("block"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	h.cfg.DataDir = badDir
+	// Block atomic replacement without mutating config beneath the saver.
+	unblock := blockBotRegistrationSave(t, h, botGroupFile)
 	phoneID := strings.Repeat("a", 64)
-	failed := botRequest(t, h, http.MethodPost, "/v1/bot/phone/bind", map[string]any{"binding": p, "phoneId": phoneID}, nil)
+	failed := botRequest(t, h, http.MethodPost, "/v1/bot/phone/bind", botV2Body(p, phoneID), nil)
 	if failed.Code != http.StatusServiceUnavailable {
 		t.Fatalf("failed bind status: %d %s", failed.Code, failed.Body.String())
 	}
-	h.cfg.DataDir = dir
-	retried := botRequest(t, h, http.MethodPost, "/v1/bot/phone/bind", map[string]any{"binding": p, "phoneId": phoneID}, nil)
+	unblock()
+	retried := botRequest(t, h, http.MethodPost, "/v1/bot/phone/bind", botV2Body(p, phoneID), nil)
 	if retried.Code != http.StatusOK {
 		t.Fatalf("retry after failed persistence: %d %s", retried.Code, retried.Body.String())
 	}

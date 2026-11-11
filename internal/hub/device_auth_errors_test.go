@@ -35,16 +35,26 @@ func TestDeviceAuthErrorsStayRemoteAndNeverCheckModelKey(t *testing.T) {
 		{"missing-secret", "/bridge/pair/status", "device_credentials_invalid", map[string]string{"X-Salcara-Device-Id": "enrolled-pc"}},
 		{"old-phone", "/app/devices", "pair_credentials_invalid", map[string]string{"X-Salcara-Pair-Token": strings.Repeat("c", 64)}},
 		{"old-bot", "/app/devices", "bot_credentials_invalid", map[string]string{"X-Salcara-Bot-Token": strings.Repeat("d", 64)}},
+		{"old-bot-alone", "/app/devices", "bot_credentials_invalid", map[string]string{"X-Salcara-Bot-Token": strings.Repeat("d", 64)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "/salcara-hub/v1"+tc.path, nil)
-			r.Header.Set("Authorization", "Bearer synthetic-model-key-must-not-be-used")
+			if tc.name != "old-bot-alone" {
+				r.Header.Set("Authorization", "Bearer synthetic-model-key-must-not-be-used")
+			}
 			for name, value := range tc.headers {
 				r.Header.Set(name, value)
 			}
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
-			assertRemoteCredentialError(t, w, http.StatusForbidden, tc.code, "设备凭证或手机绑定已失效，请重新扫码绑定")
+			switch tc.name {
+			case "old-bot":
+				assertRemoteCredentialError(t, w, http.StatusBadRequest, "ambiguous_credentials", "请只使用一组 Bot 手机凭据")
+			case "old-bot-alone":
+				assertRemoteCredentialError(t, w, http.StatusForbidden, tc.code, "Bot 手机凭据已失效")
+			default:
+				assertRemoteCredentialError(t, w, http.StatusForbidden, tc.code, "设备凭证或手机绑定已失效，请重新扫码绑定")
+			}
 		})
 	}
 	if transport.calls.Load() != 0 {

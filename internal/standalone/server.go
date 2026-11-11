@@ -304,6 +304,8 @@ func (s *Server) serveWeb(w http.ResponseWriter, r *http.Request) {
 		file, kind = "index.html", "text/html; charset=utf-8"
 	case Prefix + "/admin/app.js":
 		file, kind = "app.js", "text/javascript; charset=utf-8"
+	case Prefix + "/admin/bot-reset-store.js":
+		file, kind = "bot-reset-store.js", "text/javascript; charset=utf-8"
 	case Prefix + "/admin/network.js":
 		file, kind = "network.js", "text/javascript; charset=utf-8"
 	case Prefix + "/admin/sources.js":

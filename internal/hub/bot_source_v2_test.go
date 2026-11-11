@@ -56,7 +56,7 @@ func newBotSourceFixture(t *testing.T) *botSourceFixture {
 
 func bindBotSourcePhone(t *testing.T, h *Hub, pack BotBindingPackage) string {
 	t.Helper()
-	w := botRequest(t, h, http.MethodPost, "/v1/bot/phone/bind", map[string]any{"binding": pack, "phoneId": strings.Repeat("a", 64)}, nil)
+	w := botRequest(t, h, http.MethodPost, "/v1/bot/phone/bind", botV2Body(pack, strings.Repeat("a", 64)), nil)
 	var result struct {
 		BotToken string `json:"botToken"`
 	}
@@ -247,6 +247,7 @@ func TestBotSourceV2RevocationDuringAcquisitionCannotReleaseGrant(t *testing.T) 
 	if revoked.Code != 200 {
 		t.Fatal(revoked.Body)
 	}
+	f.pack = resetBotPhonePackage(t, f.h, f.pack.GroupID)
 	f.token = bindBotSourcePhone(t, f.h, f.pack)
 	pending.ch <- replyBody{OK: true, Result: grant}
 	select {
@@ -294,6 +295,7 @@ func TestBotSourceV2RevocationGroupIsolationAndPolicyChanges(t *testing.T) {
 	if code := f.h.evaluateSourcePolicy("bot:"+f.pack.GroupID, f.request("/app/commands", req), req); code != "device_authorization_expired" {
 		t.Fatalf("revoked phone accepted: %s", code)
 	}
+	f.pack = resetBotPhonePackage(t, f.h, f.pack.GroupID)
 	f.token = bindBotSourcePhone(t, f.h, f.pack)
 	if f.token == oldToken {
 		t.Fatal("rebind reused credential")

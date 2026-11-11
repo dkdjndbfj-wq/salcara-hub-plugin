@@ -7,6 +7,9 @@
   const remoteScopes = ['api', 'external', 'proxy'];
   let adminRole = 'owner', adminName = '主管理员', storageDirty = false, storageEdit = 0;
   let botReadSeq = 0;
+  let botMode = false, botResetCandidate = null, botResetOwner = '', botResetStorageError = '';
+  const botResetPending = new Map();
+  const botResetStore = window.SalcaraBotResetStore?.({ isOwner: () => authenticated && adminRole === 'owner', getOwner: () => botResetOwner });
   let updateInfo = null, updateTimer = null, updateReading = false, updateSeq = 0, pendingUpdate = null, updateTracking = false;
   const controllers = new Set();
   const names = { ping: '测量', revoke: '撤销绑定', disconnect: '临时断开', ban: '封禁', unban: '解封', 'resource-mode': '切换运行模式', 'remote-access': '修改远程来源', 'device-cleanup': '修改自动清理', 'device-cleanup-run': '自动清理' };
@@ -70,6 +73,7 @@
     pending = null; busy = false; updateCandidate = null; updaterConfigured = false; resourceMode = ''; modes = []; modeCandidate = null; if ($('operation').open) $('operation').close(); if ($('update-dialog').open) $('update-dialog').close(); if ($('mode-dialog').open) $('mode-dialog').close(); cleanupCandidate = null; if ($('cleanup-dialog').open) $('cleanup-dialog').close(); $('cleanup-current').textContent = '未认证'; $('cleanup-details').textContent = '';
     $('enrollment-result').hidden = true; $('enrollment-value').value = ''; $('enrollment-expiry').textContent = ''; $('hub-address').textContent = '正在读取 Hub 地址';
     botReadSeq++; $('bot-binding-value').value = ''; $('bot-binding-result').hidden = true; $('bot-panel').hidden = true; $('bot-groups').replaceChildren();
+    botMode = false; botResetCandidate = null; botResetOwner = ''; botResetStorageError = ''; botResetPending.clear(); $('bot-reset-reason').value = ''; $('bot-reset-confirm').checked = false; $('bot-reset-notice').textContent = ''; $('bot-reset-target').textContent = ''; if ($('bot-reset-dialog').open) $('bot-reset-dialog').close();
     for (const id of ['storage-days','storage-global','storage-binding']) $(id).value = '';
     $('storage-queue').checked = false; $('storage-current').textContent = '未认证'; $('storage-details').textContent = '';
     $('mode-options').replaceChildren(); $('mode-current').textContent = '未认证'; $('mode-details').textContent = '';
@@ -91,7 +95,7 @@
       if (response.status === 401) { if (!anonymous) clearSession('登录已过期，请重新进入。'); throw new Error(path === 'auth/login' ? '账号或密码不正确，请检查管理员账号与管理密钥。' : '请重新进入。'); }
       let data; try { data = response.ok && format === 'text' ? await response.text() : await response.json(); } catch { throw new Error('返回的不是 Hub 接口，请检查反向代理路径。'); }
       if (generation !== epoch) throw new Error('管理员会话已关闭。');
-      if (!response.ok) throw new Error(data.error || data.message || `请求失败（${response.status}）`);
+      if (!response.ok) { const error = new Error(data.error || data.message || `请求失败（${response.status}）`); error.status = response.status; error.code = data.error; throw error; }
       return data;
     } catch (error) { if (error.name === 'AbortError') throw new Error('请求中断或超时；操作可能已送达，请刷新状态，不要直接重复操作。'); throw error; }
     finally { clearTimeout(timeout); controllers.delete(controller); externalSignal?.removeEventListener('abort', abortExternal); }
@@ -100,6 +104,7 @@
     if (typeof value.csrf_token !== 'string' || value.csrf_token.length < 32 || value.csrf_token.length > 128 || /[^A-Za-z0-9_-]/.test(value.csrf_token)) throw new Error('登录响应无效，请检查 Hub 地址。');
     csrf = value.csrf_token; authenticated = true;
     adminRole = value.role || 'owner'; adminName = value.name || '主管理员';
+    botResetOwner = adminRole === 'owner' ? value.actor || 'owner' : ''; restoreBotResetPending();
     $('new-admin-username').value = value.username || 'admin'; $('login-error').textContent = '';
     for (const id of ['servers','network','access','system','updates']) $('nav-' + id).hidden = adminRole !== 'owner';
     if ($('admin-identity')) $('admin-identity').textContent = adminRole === 'owner' ? '主管理员' : `${adminName} · ${{operator:'运维',viewer:'只读'}[adminRole] || '受限'}`;
@@ -111,6 +116,7 @@
   function showWorkspace() { $('workspace').hidden = false; $('login-panel').hidden = true; showPage(activePage); }
   function render(value, updateRevision = updateSeq) {
     if (!authenticated) return;
+    botMode = value.deployment_mode === 'bot';
     $('hub-address').textContent = typeof value.public_url === 'string' && value.public_url
       ? value.public_url
       : `${window.location.origin}/salcara-hub`;
@@ -141,6 +147,7 @@
       const moreActions = document.createElement('div'); moreActions.className = 'more-actions';
       more.append(summary, moreActions);
       for (const action of ['ping','revoke','disconnect', d.banned ? 'unban' : 'ban']) {
+        if (botMode && action === 'revoke') continue;
         const button = text('button', names[action], action === 'ban' || action === 'revoke' ? 'secondary text-danger' : 'secondary'); button.type = 'button';
         button.disabled = adminRole === 'viewer' || (action === 'ping' && (!d.online || d.banned || d.user_disabled)) || (action === 'disconnect' && !d.online) || (action === 'revoke' && !d.paired && d.pair_state !== 'pending');
         button.addEventListener('click', () => { more.open = false; begin(action, d.ref, d); });
@@ -177,21 +184,107 @@
       const value = await request('bot/invites');
       if (generation !== epoch || seq !== botReadSeq) return;
       box.replaceChildren();
-      const groups = Array.isArray(value.groups) ? value.groups : [];
+      if (botResetStorageError) box.append(text('p', botResetStorageError, 'text-danger'));
+      const groups = Array.isArray(value.groups) ? [...value.groups] : [];
+      for (const record of botResetPending.values()) if (!groups.some(group => group.groupId === record.groupId)) groups.push({ groupId: record.groupId, phoneRevision: record.expectedRevision, phonePending: true, revoked: true, recoveryOnly: true });
       if (!groups.length) { box.append(text('p', '尚未生成 Bot 绑定包。')); return; }
       for (const group of groups) {
-        const row = text('p', `组 ${String(group.groupId).slice(0, 12)}… · ${Number(group.computers) || 0}/8 台电脑 · ${group.phoneBound ? '已绑定手机' : '未绑定手机'}${group.revoked ? ' · 已撤销' : ''}`);
-        if (!group.revoked) { const button = text('button', '撤销', 'secondary'); button.type = 'button'; button.addEventListener('click', async () => {
-          if (busy || !authenticated || adminRole !== 'owner' || !confirm('撤销这个 Bot 组的新增绑定权限？已有设备需分别撤销。')) return;
+        const row = text('p', `组 ${String(group.groupId)} · ${group.recoveryOnly ? '有未确认的恢复请求，最新组状态未找到' : `${Number(group.computers) || 0}/8 台电脑 · ${group.phonePending ? '手机变更待完成' : group.phoneBound ? '已绑定手机' : '未绑定手机'}${group.revoked ? ' · 已停止新增绑定' : ''}`}`);
+        if (!group.revoked) { const button = text('button', '停止新增绑定', 'secondary'); button.type = 'button'; button.disabled = Boolean(group.phonePending) || botResetPending.has(group.groupId); button.addEventListener('click', async () => {
+          if (busy || !authenticated || adminRole !== 'owner' || botResetPending.has(group.groupId) || !confirm(`停止组 ${group.groupId} 的新增绑定？已有电脑和手机权限保留。`)) return;
           const generation = epoch; busy = true; button.disabled = true; syncUpdateButtons();
-          try { await request('bot/invites/revoke', 'POST', { groupId: group.groupId, confirm: true }); await refreshBotGroups(); if (generation === epoch) note('已停止该组新增绑定。已有设备需在设备页分别撤销。'); }
+          try { await request('bot/invites/revoke', 'POST', { groupId: group.groupId, confirm: true }); if (generation !== epoch) return; await refreshBotGroups(); if (generation === epoch) note('已停止该组新增绑定，已有电脑和手机权限保留。'); }
           catch (error) { if (generation === epoch) note(error.message, true); }
           finally { if (generation === epoch) { busy = false; button.disabled = false; syncUpdateButtons(); } }
         }); row.append(' ', button); }
+        const retry = botResetPending.has(group.groupId);
+        const reset = text('button', retry ? '重试本次手机重置' : '重置手机并更新绑定包', 'secondary text-danger'); reset.type = 'button';
+        reset.disabled = !retry && (Boolean(group.phonePending) || !/^[0-9a-f]{32}$/.test(group.phoneRevision || ''));
+        reset.addEventListener('click', () => openBotPhoneReset(group)); row.append(' ', reset);
         box.append(row);
       }
     } catch (error) { if (generation === epoch && seq === botReadSeq) box.textContent = error.message; }
   }
+  function restoreBotResetPending() {
+    botResetPending.clear(); botResetStorageError = '';
+    if (!authenticated || adminRole !== 'owner') return;
+    try {
+      if (!botResetStore) throw new Error('重置恢复组件未加载，请刷新管理页面后重试。');
+      for (const record of botResetStore.load()) if (!botResetPending.has(record.groupId)) botResetPending.set(record.groupId, record);
+    } catch (error) { botResetStorageError = error.message || '浏览器无法读取重置恢复记录。'; }
+  }
+  async function finishBotResetRecord(payload) {
+    try { await botResetStore.remove(payload); restoreBotResetPending(); return true; }
+    catch { return false; }
+  }
+  function openBotPhoneReset(group) {
+    if (busy || !authenticated || adminRole !== 'owner' || !botMode) return;
+    const retry = botResetPending.get(group.groupId);
+    if (!retry && (group.phonePending || !/^[0-9a-f]{32}$/.test(group.phoneRevision || ''))) return;
+    botResetCandidate = { groupId: group.groupId, expectedRevision: group.phoneRevision };
+    $('bot-reset-target').textContent = `原组：${group.groupId}`;
+    $('bot-reset-reason').value = retry?.reason || ''; $('bot-reset-reason').disabled = Boolean(retry);
+    $('bot-reset-confirm').checked = Boolean(retry); $('bot-reset-confirm').disabled = Boolean(retry);
+    $('bot-reset-submit').textContent = retry ? '重试同一次重置' : '确认重置手机'; $('bot-reset-submit').disabled = false; $('bot-reset-cancel').disabled = false;
+    $('bot-reset-notice').textContent = botResetStorageError || (retry ? '已恢复未确认的重置请求；继续沿用原请求和版本，不会新建一轮重置。' : '发送前会在此浏览器保存重试标识和操作原因；不会保存绑定包或手机凭据。');
+    $('bot-reset-dialog').showModal();
+  }
+  $('bot-reset-cancel').addEventListener('click', () => { if (!busy) { botResetCandidate = null; $('bot-reset-dialog').close(); } });
+  $('bot-reset-dialog').addEventListener('cancel', event => { if (busy) event.preventDefault(); });
+  $('bot-reset-dialog').addEventListener('close', () => { botResetCandidate = null; });
+  $('bot-reset-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (busy || !authenticated || adminRole !== 'owner' || !botMode || !botResetCandidate) return;
+    const candidate = botResetCandidate, generation = epoch;
+    let payload = botResetPending.get(candidate.groupId);
+    if (!payload) {
+      const reason = $('bot-reset-reason').value.trim();
+      if (!$('bot-reset-confirm').checked || !reason || new TextEncoder().encode(reason).length > 256) { $('bot-reset-notice').textContent = '请填写 1–256 字节的操作原因，并确认重置影响。'; return; }
+      if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') { $('bot-reset-notice').textContent = '此浏览器无法生成安全请求标识，请使用受信任的 HTTPS 管理页面。'; return; }
+      payload = Object.freeze({ ...candidate, requestId: crypto.randomUUID(), confirm: true, reason });
+    }
+    busy = true; botReadSeq++; syncUpdateButtons(); $('bot-reset-submit').disabled = true; $('bot-reset-cancel').disabled = true; $('bot-reset-reason').disabled = true; $('bot-reset-confirm').disabled = true;
+    $('bot-reset-notice').textContent = '正在重置原组手机并保存新绑定包…'; $('bot-binding-value').value = ''; $('bot-binding-result').hidden = true;
+    let submitted = false;
+    try {
+      if (!botResetStore) throw new Error('重置恢复组件未加载。');
+      const saved = await botResetStore.prepare(payload);
+      if (generation !== epoch) return;
+      botResetPending.set(saved.groupId, saved);
+      if (['groupId','expectedRevision','requestId','confirm','reason'].some(field => saved[field] !== payload[field])) {
+        $('bot-reset-reason').value = saved.reason; $('bot-reset-confirm').checked = true;
+        $('bot-reset-notice').textContent = '已发现并恢复另一个页面保存的未确认请求。请核对原因，再点击继续同一次重置。';
+        $('bot-reset-submit').textContent = '继续同一次重置'; return;
+      }
+      payload = saved; submitted = true;
+      const result = await request('bot/phone/reset', 'POST', payload);
+      if (generation !== epoch) return;
+      if (result.ok !== true || result.groupId !== payload.groupId || result.binding?.groupId !== payload.groupId || !/^[0-9a-f]{32}$/.test(result.phoneRevision || '') || !result.binding?.invite || !result.binding?.signature) throw new Error('重置响应不完整');
+      const cleared = await finishBotResetRecord(payload);
+      if (generation !== epoch) return;
+      $('bot-binding-value').value = JSON.stringify(result.binding, null, 2); $('bot-binding-result').hidden = false;
+      botResetCandidate = null; $('bot-reset-dialog').close(); await refreshBotGroups();
+      if (generation === epoch) note(`原组手机已重置，旧手机和旧绑定包已失效。电脑及历史保留，请安全交付新绑定包。${cleared ? '' : '浏览器暂未清除恢复记录；再次进入会沿用同一请求。'}`, !cleared);
+    } catch (error) {
+      if (generation !== epoch) return;
+      if (!submitted) {
+        restoreBotResetPending();
+        $('bot-reset-notice').textContent = `${error.message} 本次请求尚未发送：必须先可靠保存恢复记录。`;
+        $('bot-reset-reason').disabled = botResetPending.has(candidate.groupId); $('bot-reset-confirm').disabled = botResetPending.has(candidate.groupId);
+        return;
+      }
+      const terminal = error.status === 409 && error.code === 'bot_phone_revision_conflict' || error.status === 404 && error.code === 'bot_group_not_found' || error.status === 400 && error.code === 'invalid_request';
+      if (terminal) {
+        const cleared = await finishBotResetRecord(payload);
+        if (generation !== epoch) return;
+        botResetCandidate = null; $('bot-reset-dialog').close(); await refreshBotGroups();
+        if (generation === epoch) note(`该组已变化或请求无效，本次重试已结束。${!cleared ? '浏览器暂未清除恢复记录，请稍后重试清除。' : botResetPending.has(payload.groupId) ? '该组还有未确认请求，请继续恢复。' : '请核对最新组状态后再决定是否重置。'}`, true);
+      } else {
+        $('bot-reset-notice').textContent = `${error.message} 结果尚未确认；再次点击仅重试同一请求。已保存恢复标识，刷新或重新登录后可继续。`;
+        $('bot-reset-submit').textContent = '重试同一次重置';
+        await refreshBotGroups();
+      }
+    } finally { if (generation === epoch) { busy = false; $('bot-reset-submit').disabled = false; $('bot-reset-cancel').disabled = false; syncUpdateButtons(); } }
+  });
   async function refresh(reloadRemoteAccess = false) {
     const generation = epoch, requestSeq = ++refreshSeq, updateRevision = updateSeq;
     const query = new URLSearchParams({ query: $('search').value.trim(), filter: $('filter').value, offset: String(offset), limit: String(limit) });
@@ -208,7 +301,13 @@
     }
     catch (error) { if (generation === epoch && requestSeq === refreshSeq) { if (authenticated) { $('health').textContent = '连接不可用'; $('health').className = 'pill bad'; } note(error.message, true); } throw error; }
   }
-  function begin(action, ref, device = {}) { if (busy) return; if (action === 'ping') { perform({ action, device_ref: ref, reason: '', confirm: true }); return; } pending = { action, device_ref: ref }; $('operation-title').textContent = `确认${names[action]}`; $('operation-target').textContent = `${device.name || '设备'}${device.user_name ? ' · '+device.user_name : ''} · ${ref.slice(0,12)}`; $('operation-impact').textContent = {ban:'将断开电脑、撤销手机配对，并阻止此设备再次连接。电脑本地任务保留。',unban:'允许电脑重新连接；原手机配对不会恢复，需要重新扫码。用户禁用仍然有效。',revoke:'手机将失去这台电脑的访问权限，需要重新扫码。电脑本地任务保留。',disconnect:'临时断开远程连接，电脑可能自动重连。如需持续阻止访问，请禁用用户或封禁设备。'}[action] || ''; $('operation-error').textContent=''; $('reason').value = ''; $('operation').showModal(); }
+  function begin(action, ref, device = {}) {
+    if (busy || botMode && action === 'revoke') return;
+    if (action === 'ping') { perform({ action, device_ref: ref, reason: '', confirm: true }); return; }
+    pending = { action, device_ref: ref }; $('operation-title').textContent = `确认${names[action]}`; $('operation-target').textContent = `${device.name || '设备'}${device.user_name ? ' · '+device.user_name : ''} · ${ref.slice(0,12)}`;
+    $('operation-impact').textContent = {ban:botMode ? '阻止该电脑继续接受远程控制；不会重置 Bot 组手机，也不影响其他电脑。电脑本地任务保留。' : '将断开电脑、撤销手机配对，并阻止此设备再次连接。电脑本地任务保留。',unban:botMode ? '允许该电脑重新连接；不会重置 Bot 组手机或恢复已失效的绑定包。' : '允许电脑重新连接；原手机配对不会恢复，需要重新扫码。用户禁用仍然有效。',revoke:'手机将失去这台电脑的访问权限，需要重新扫码。此操作只针对普通二维码配对，不会重置 Bot 组手机。电脑本地任务保留。',disconnect:'临时断开远程连接，电脑可能自动重连。如需持续阻止访问，请禁用用户或封禁设备。'}[action] || '';
+    $('operation-error').textContent=''; $('reason').value = ''; $('operation').showModal();
+  }
   async function perform(value) { if (busy) return; const generation = epoch; busy = true; syncUpdateButtons(); note('正在执行；不会自动重试。'); try { await request('action', 'POST', value); await refresh(); if (generation === epoch) note('管理操作完成。'); } catch (error) { if (generation === epoch) note(error.message, true); } finally { if (generation === epoch) { busy = false; syncUpdateButtons(); } } }
   $('login-form').addEventListener('submit', async event => {
     event.preventDefault(); if (busy) return;

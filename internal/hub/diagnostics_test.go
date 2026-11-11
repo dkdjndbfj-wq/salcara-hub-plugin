@@ -216,7 +216,7 @@ func TestAppDiagnosticsBotRequiresExactGroupOwnership(t *testing.T) {
 		t.Fatal(w.Body.String())
 	}
 	for i, group := range []BotBindingPackage{one, two} {
-		bound := botRequest(t, h, "POST", "/v1/bot/phone/bind", map[string]any{"binding": group, "phoneId": strings.Repeat(string(rune('a'+i)), 64)}, nil)
+		bound := botRequest(t, h, "POST", "/v1/bot/phone/bind", botV2Body(group, strings.Repeat(string(rune('a'+i)), 64)), nil)
 		var phone struct {
 			BotToken string `json:"botToken"`
 		}

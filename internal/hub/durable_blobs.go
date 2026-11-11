@@ -270,6 +270,64 @@ func (s *durableStore) retainCommandBlobs(scope string, raw []byte, ref string) 
 	return tx.Commit()
 }
 
+// Blob reads and local mutations freeze the same scope as request admission.
+// The Bridge keeps its independent credential but cannot relabel old phone
+// data after a group generation changes either.
+func (h *Hub) blobScopeMatchesLocked(acct string, r *http.Request, deviceID, scope string, bridge bool) bool {
+	if !bridge {
+		return h.appStorageScopeMatchesLocked(acct, r, deviceID, scope)
+	}
+	a := h.accounts[acct]
+	if a == nil {
+		return false
+	}
+	d := a.devices[deviceID]
+	return d != nil && !d.banned && h.matchesReadyDeviceSecret(d, r) &&
+		(d.bindingID == "" || d.hasPair && r.Header.Get("X-Salcara-Binding-Id") == d.bindingID && r.Header.Get("X-Salcara-Phone-Hash") == d.phoneHash) &&
+		h.eventScopeMatchesLocked(acct, d, r.Header.Get("X-Salcara-Event-Scope")) && h.durableScopeLocked(acct, d) == scope
+}
+
+func (h *Hub) withBlobScope(acct string, r *http.Request, deviceID, scope string, bridge bool, action func() error) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.blobScopeMatchesLocked(acct, r, deviceID, scope, bridge) {
+		return errStorageAuthorization
+	}
+	return action()
+}
+
+func (h *Hub) blobScopeCurrent(acct string, r *http.Request, deviceID, scope string, bridge bool) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.blobScopeMatchesLocked(acct, r, deviceID, scope, bridge)
+}
+
+func (h *Hub) writeBlobScopeError(w http.ResponseWriter, r *http.Request, bridge bool) {
+	if bridge {
+		writeEventScopeChanged(w)
+		return
+	}
+	h.writeStorageAuthorizationError(w, r, "图片授权已失效")
+}
+
+type scopeCheckedBlobReader struct {
+	reader  io.Reader
+	current func() bool
+}
+
+func (r scopeCheckedBlobReader) Read(data []byte) (int, error) {
+	if !r.current() {
+		return 0, errStorageAuthorization
+	}
+	n, err := r.reader.Read(data)
+	// Each local part lookup may wait in SQL. Check after it completes, before
+	// handing bytes to the network writer; never hold Hub.mu across Write.
+	if !r.current() {
+		return 0, errStorageAuthorization
+	}
+	return n, err
+}
+
 func (h *Hub) handleBlobs(w http.ResponseWriter, r *http.Request, acct string) {
 	s := h.durable
 	if s == nil {
@@ -299,8 +357,26 @@ func (h *Hub) handleBlobs(w http.ResponseWriter, r *http.Request, acct string) {
 		_, scope, authorized = h.appStorageIdentity(acct, r, deviceID)
 	}
 	if !authorized {
-		writeError(w, 403, "图片授权已失效")
+		h.writeStorageAuthorizationError(w, r, "图片授权已失效")
 		return
+	}
+	mutate := func(action func() error) error {
+		return h.withBlobScope(acct, r, deviceID, scope, bridge, action)
+	}
+	current := func() bool { return h.blobScopeCurrent(acct, r, deviceID, scope, bridge) }
+	requireCurrent := func() bool {
+		if current() {
+			return true
+		}
+		h.writeBlobScopeError(w, r, bridge)
+		return false
+	}
+	writeFailure := func(err error) {
+		if errors.Is(err, errStorageAuthorization) {
+			h.writeBlobScopeError(w, r, bridge)
+			return
+		}
+		writeBlobError(w, err)
 	}
 	if r.Method == http.MethodGet {
 		id := q.Get("id")
@@ -309,9 +385,12 @@ func (h *Hub) handleBlobs(w http.ResponseWriter, r *http.Request, acct string) {
 			return
 		}
 		if q.Get("variant") == "thumbnail" {
-			data, err := s.thumbnail(scope, id)
+			data, err := s.thumbnailGuarded(scope, id, mutate)
 			if err != nil {
-				writeBlobError(w, err)
+				writeFailure(err)
+				return
+			}
+			if !requireCurrent() {
 				return
 			}
 			w.Header().Set("Content-Type", "image/jpeg")
@@ -327,11 +406,17 @@ func (h *Hub) handleBlobs(w http.ResponseWriter, r *http.Request, acct string) {
 			writeJSON(w, 410, map[string]any{"code": "attachment_expired", "error": "图片已过期"})
 			return
 		}
-		// The lease protects an in-flight stream from a concurrent cleanup pass.
-		_, err = s.db.Exec(`UPDATE blobs SET lease=MAX(lease,?) WHERE id=?`, nowMs()+int64(2*time.Minute/time.Millisecond), id)
 		s.mu.Unlock()
+		// Reads may have waited in SQL after authentication. Lease mutation
+		// requires the current credential generation too.
+		err = mutate(func() error {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			_, err := s.db.Exec(`UPDATE blobs SET lease=MAX(lease,?) WHERE id=? AND scope=?`, nowMs()+int64(2*time.Minute/time.Millisecond), id, scope)
+			return err
+		})
 		if err != nil {
-			writeError(w, 503, "图片暂时不可用")
+			writeFailure(err)
 			return
 		}
 		reader, err := s.blobReader(scope, id)
@@ -339,10 +424,18 @@ func (h *Hub) handleBlobs(w http.ResponseWriter, r *http.Request, acct string) {
 			writeError(w, 503, "图片暂时不可用")
 			return
 		}
+		if !requireCurrent() {
+			return
+		}
 		w.Header().Set("Content-Type", info.Mime)
 		w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
 		w.Header().Set("Cache-Control", "private, no-store")
-		_, _ = io.CopyBuffer(w, reader, make([]byte, 256<<10))
+		n, err := io.CopyBuffer(w, scopeCheckedBlobReader{reader: reader, current: current}, make([]byte, 256<<10))
+		if errors.Is(err, errStorageAuthorization) && n == 0 {
+			w.Header().Del("Content-Type")
+			w.Header().Del("Content-Length")
+			h.writeBlobScopeError(w, r, bridge)
+		}
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -372,11 +465,17 @@ func (h *Hub) handleBlobs(w http.ResponseWriter, r *http.Request, acct string) {
 	// Raw callers and phone chunk callers use different chunk sizes. A ready
 	// object is compared by whole-content digest, independent of chunk layout.
 	info, state, existingErr := s.blobInfo(scope, id)
+	if !requireCurrent() {
+		return
+	}
 	if existingErr == nil && state == "ready" {
 		hash := sha256.New()
 		n, err := io.CopyBuffer(hash, r.Body, make([]byte, 256<<10))
 		if err != nil || n != info.Size || info.Mime != mime || hex.EncodeToString(hash.Sum(nil)) != info.Hash {
 			writeError(w, 409, "图片编号已用于其他内容")
+			return
+		}
+		if !requireCurrent() {
 			return
 		}
 		writeJSON(w, 200, info)
@@ -395,8 +494,11 @@ func (h *Hub) handleBlobs(w http.ResponseWriter, r *http.Request, acct string) {
 			return
 		}
 		remaining -= n
-		if _, err := s.putBlobPart(scope, id, mime, index, total, data); err != nil {
-			writeBlobError(w, err)
+		if err := mutate(func() error {
+			_, err := s.putBlobPart(scope, id, mime, index, total, data)
+			return err
+		}); err != nil {
+			writeFailure(err)
 			return
 		}
 	}
@@ -408,6 +510,9 @@ func (h *Hub) handleBlobs(w http.ResponseWriter, r *http.Request, acct string) {
 	info, state, err := s.blobInfo(scope, id)
 	if err != nil || state != "ready" {
 		writeError(w, 503, "图片尚未完成保存")
+		return
+	}
+	if !requireCurrent() {
 		return
 	}
 	writeJSON(w, 200, info)
@@ -463,8 +568,25 @@ func (h *Hub) handleStoredAttachment(w http.ResponseWriter, r *http.Request, acc
 	}
 	_, scope, ok := h.appStorageIdentity(acct, r, req.DeviceID)
 	if !ok {
-		writeError(w, 403, "图片授权已失效")
+		h.writeStorageAuthorizationError(w, r, "图片授权已失效")
 		return true
+	}
+	mutate := func(action func() error) error {
+		return h.withAppStorageScope(acct, r, req.DeviceID, scope, action)
+	}
+	requireCurrent := func() bool {
+		if h.blobScopeCurrent(acct, r, req.DeviceID, scope, false) {
+			return true
+		}
+		h.writeStorageAuthorizationError(w, r, "图片授权已失效")
+		return false
+	}
+	writeFailure := func(err error) {
+		if errors.Is(err, errStorageAuthorization) {
+			h.writeStorageAuthorizationError(w, r, "图片授权已失效")
+			return
+		}
+		writeBlobError(w, err)
 	}
 	if in.Type == "attachment.put" {
 		select {
@@ -483,9 +605,14 @@ func (h *Hub) handleStoredAttachment(w http.ResponseWriter, r *http.Request, acc
 			writeBlobError(w, errBlobInvalid)
 			return true
 		}
-		complete, err := h.durable.putBlobPart(scope, in.ID, in.Mime, in.Index, in.Total, data)
+		var complete bool
+		err = mutate(func() error {
+			var err error
+			complete, err = h.durable.putBlobPart(scope, in.ID, in.Mime, in.Index, in.Total, data)
+			return err
+		})
 		if err != nil {
-			writeBlobError(w, err)
+			writeFailure(err)
 			return true
 		}
 		// The part digest is the durable idempotency fence. Release its verified
@@ -505,6 +632,9 @@ func (h *Hub) handleStoredAttachment(w http.ResponseWriter, r *http.Request, acc
 			}
 			h.remoteAccessGate.RUnlock()
 		}
+		if !requireCurrent() {
+			return true
+		}
 		writeJSON(w, 200, map[string]any{"ok": true, "result": map[string]any{"id": in.ID, "complete": complete}})
 		return true
 	}
@@ -513,6 +643,9 @@ func (h *Hub) handleStoredAttachment(w http.ResponseWriter, r *http.Request, acc
 	info, state, err := s.blobInfo(scope, in.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		s.mu.Unlock()
+		if !requireCurrent() {
+			return true
+		}
 		if in.Variant == "thumbnail" {
 			writeJSON(w, 410, map[string]any{"code": "thumbnail_unavailable", "error": "此图片暂时没有可用缩略图"})
 			return true
@@ -533,9 +666,9 @@ func (h *Hub) handleStoredAttachment(w http.ResponseWriter, r *http.Request, acc
 	}
 	if in.Variant == "thumbnail" {
 		s.mu.Unlock()
-		data, err := s.thumbnail(scope, in.ID)
+		data, err := s.thumbnailGuarded(scope, in.ID, mutate)
 		if err != nil {
-			writeBlobError(w, err)
+			writeFailure(err)
 			return true
 		}
 		if in.Offset < 0 || in.Offset > len(data) {
@@ -555,6 +688,9 @@ func (h *Hub) handleStoredAttachment(w http.ResponseWriter, r *http.Request, acc
 			return true
 		}
 		digest := sha256.Sum256(data)
+		if !requireCurrent() {
+			return true
+		}
 		writeJSON(w, 200, map[string]any{"ok": true, "result": map[string]any{"id": in.ID, "variant": "thumbnail", "mime": "image/jpeg", "size": len(data), "width": cfg.Width, "height": cfg.Height, "sha256": hex.EncodeToString(digest[:]), "offset": in.Offset, "nextOffset": next, "complete": next >= len(data), "data": base64.StdEncoding.EncodeToString(data[in.Offset:next])}})
 		return true
 	}
@@ -571,10 +707,15 @@ func (h *Hub) handleStoredAttachment(w http.ResponseWriter, r *http.Request, acc
 	if in.Length <= 0 || in.Length > 90000 {
 		in.Length = 90000
 	}
-	_, err = s.db.Exec(`UPDATE blobs SET lease=MAX(lease,?) WHERE id=?`, nowMs()+int64(2*time.Minute/time.Millisecond), in.ID)
 	s.mu.Unlock()
+	err = mutate(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		_, err := s.db.Exec(`UPDATE blobs SET lease=MAX(lease,?) WHERE id=? AND scope=?`, nowMs()+int64(2*time.Minute/time.Millisecond), in.ID, scope)
+		return err
+	})
 	if err != nil {
-		writeError(w, 503, "图片暂时不可用")
+		writeFailure(err)
 		return true
 	}
 	reader, err := s.blobReader(scope, in.ID)
@@ -592,6 +733,9 @@ func (h *Hub) handleStoredAttachment(w http.ResponseWriter, r *http.Request, acc
 		return true
 	}
 	next := in.Offset + len(data)
+	if !requireCurrent() {
+		return true
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "result": map[string]any{"id": in.ID, "mime": info.Mime, "size": info.Size, "offset": in.Offset, "nextOffset": next, "complete": int64(next) >= info.Size, "data": base64.StdEncoding.EncodeToString(data)}})
 	return true
 }

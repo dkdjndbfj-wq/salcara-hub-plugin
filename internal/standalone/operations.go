@@ -86,6 +86,9 @@ func auditAction(path string) string {
 	if p == "users" {
 		return "users"
 	}
+	if p == "bot/phone/reset" {
+		return p
+	}
 	// No request body, query, URL credentials, device IDs or arbitrary paths.
 	for _, v := range []string{"action", "resource-mode", "remote-access", "device-cleanup", "storage", "enrollment-claims", "auth/logout", "auth/password", "operations/members", "update/check", "update/apply", "servers/discover", "servers/check", "servers/save", "servers/plan", "servers/deploy", "servers/activate", "servers/delete", "ingress/save", "ingress/verify", "bot/invites", "bot/invites/revoke", "network/nodes", "network/nodes/delete", "network/policy", "network/probe", "network/probe/cancel", "network/subscriptions/inspect", "network/subscriptions/import", "network/sources/save", "network/sources/refresh", "network/sources/apply", "network/sources/delete", "network/kernel/install", "network/releases/prepare", "network/releases/start", "network/releases/confirm", "network/releases/rollback", "network/observability/query", "network/geodata/install", "network/geodata/observe", "network/geodata/configure"} {
 		if p == v {

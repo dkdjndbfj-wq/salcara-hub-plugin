@@ -201,7 +201,7 @@ func New(cfg Config) (*Hub, error) {
 		"/app/push/register":           {http.MethodPost, true, h.handlePushRegister},
 		"/bot/computer/bind":           {http.MethodPost, false, h.handleBotComputerBind},
 		"/bot/phone/bind":              {http.MethodPost, false, h.handleBotPhoneBind},
-		"/bot/phone/revoke":            {http.MethodPost, true, h.handleBotPhoneRevoke},
+		"/bot/phone/revoke":            {http.MethodPost, false, h.handleBotPhoneRevoke},
 	}
 	if err := h.loadDevices(); err != nil {
 		return nil, err
@@ -213,6 +213,9 @@ func New(cfg Config) (*Hub, error) {
 		return nil, err
 	}
 	if err := h.loadBotState(); err != nil {
+		return nil, err
+	}
+	if err := h.loadBotPhoneIntents(); err != nil {
 		return nil, err
 	}
 	if err := h.ensureBotSigningKey(); err != nil {
@@ -424,7 +427,7 @@ func (h *Hub) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	if rt.auth {
 		deviceAuth := false
 		for _, name := range []string{"X-Salcara-Device-Id", "X-Salcara-Pair-Token", "X-Salcara-Bot-Token"} {
-			if len(r.Header.Values(name)) > 1 || r.Header.Get(name) != "" {
+			if len(r.Header.Values(name)) > 1 || r.Header.Get(name) != "" || name == "X-Salcara-Bot-Token" && len(r.Header.Values(name)) != 0 {
 				deviceAuth = true
 			}
 		}
@@ -628,6 +631,9 @@ func (s *sseWriter) send(event string, data []byte) error {
 
 func (h *Hub) handlePing(w http.ResponseWriter, r *http.Request, _ string) {
 	caps, ttl := h.commandCapabilities()
+	if h.cfg.DeploymentMode == "bot" {
+		caps = append(caps, "bot.phone.binding.v2")
+	}
 	caps = append([]string{"device.identity.v1", "pair.qr.v1", "session.remote.v1", "pair.revoke.v1", "pair.status.v1", "pair.single-phone.v1", "pair.connections.v1"}, caps...)
 	caps = append(caps, "source.grant.acquire.v1", "station.guard.v1", "station.guard.v2", "station.handover.v2", "session.steer.v1", "session.context.v1", "session.actions.v1", "session.workflows.v1", "session.side-question.v1", "session.cooperation.v1")
 	caps = append(caps, "session.side-question.persistent.v1", "session.side-question.tools.v1")
@@ -1046,6 +1052,9 @@ func (h *Hub) handleAppDevices(w http.ResponseWriter, r *http.Request, acct stri
 		g := h.botGroupForTokenLocked(r)
 		if g == nil {
 			h.mu.Unlock()
+			if h.writeBotPhoneUnavailable(w, r) {
+				return
+			}
 			writeError(w, http.StatusForbidden, "Bot 手机凭据已失效")
 			return
 		}
@@ -1319,7 +1328,13 @@ func (h *Hub) handleAppCommands(w http.ResponseWriter, r *http.Request, acct str
 	if h.durable != nil && req.RequestID != "" {
 		_, scope, ok := h.appStorageIdentity(acct, r, req.DeviceID)
 		if ok {
-			if err := h.durable.retainCommandBlobs(scope, req.Command, "operation:"+req.RequestID); err != nil {
+			if err := h.withAppStorageScope(acct, r, req.DeviceID, scope, func() error {
+				return h.durable.retainCommandBlobs(scope, req.Command, "operation:"+req.RequestID)
+			}); err != nil {
+				if err == errStorageAuthorization {
+					h.writeStorageAuthorizationError(w, r, "图片授权已失效")
+					return
+				}
 				writeError(w, 503, "图片引用尚未保存，指令未发送")
 				return
 			}
@@ -1393,6 +1408,9 @@ func (h *Hub) handleAppEvents(w http.ResponseWriter, r *http.Request, acct strin
 	if a == nil || target == nil {
 		userDisabled := h.managedPairUserDisabledLocked(acct, r)
 		h.mu.Unlock()
+		if h.writeBotPhoneUnavailable(w, r) {
+			return
+		}
 		if userDisabled {
 			writeManagedUserDisabled(w)
 			return
@@ -1461,6 +1479,9 @@ func (h *Hub) handleAppEvents(w http.ResponseWriter, r *http.Request, acct strin
 			userDisabled := h.managedPairUserDisabledLocked(acct, r)
 			h.mu.Unlock()
 			if !authorized {
+				if h.writeBotPhoneUnavailable(w, r) {
+					return
+				}
 				if userDisabled {
 					writeManagedUserDisabled(w)
 					return
@@ -1489,6 +1510,9 @@ func (h *Hub) handleAppEvents(w http.ResponseWriter, r *http.Request, acct strin
 		if !authorized {
 			userDisabled := h.managedPairUserDisabledLocked(acct, r)
 			h.mu.Unlock()
+			if h.writeBotPhoneUnavailable(w, r) {
+				return
+			}
 			if userDisabled {
 				writeManagedUserDisabled(w)
 				return

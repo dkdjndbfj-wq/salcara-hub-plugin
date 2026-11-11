@@ -102,7 +102,7 @@ func (h *Hub) handleOperationPrepare(w http.ResponseWriter, r *http.Request, acc
 	}
 	actual, scope, ok := h.appStorageIdentity(acct, r, req.DeviceID)
 	if !ok {
-		writeError(w, 403, "设备授权已失效")
+		h.writeStorageAuthorizationError(w, r, "设备授权已失效")
 		return
 	}
 	if !requestUUID.MatchString(req.RequestID) || req.ReceiptOnly || req.SourceGrant != nil || req.ExecutionTicket != "" {
@@ -117,48 +117,64 @@ func (h *Hub) handleOperationPrepare(w http.ResponseWriter, r *http.Request, acc
 	owner := shaHex(actual + "\x00" + req.DeviceID + "\x00" + h.receiptCredential(actual, r))
 	h.receipts.mu.Lock()
 	defer h.receipts.mu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, err = s.db.Exec(`INSERT INTO quota_owners(owner,scope) VALUES(?,?) ON CONFLICT(owner) DO NOTHING`, owner, scope); err != nil {
-		writeError(w, 503, "存储归属尚未保存")
+	status := http.StatusOK
+	var out map[string]any
+	err = h.withAppStorageScope(acct, r, req.DeviceID, scope, func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if _, err := s.db.Exec(`INSERT INTO quota_owners(owner,scope) VALUES(?,?) ON CONFLICT(owner) DO NOTHING`, owner, scope); err != nil {
+			return err
+		}
+		var id, oldHash, ticket string
+		var deadline int64
+		err := s.db.QueryRow(`SELECT id,hash,deadline,ticket FROM operations WHERE owner=? AND intent=?`, owner, req.RequestID).Scan(&id, &oldHash, &deadline, &ticket)
+		if errors.Is(err, sql.ErrNoRows) {
+			if h.receipts.entries[shaHex(owner+"\x00"+req.RequestID)] != nil {
+				status, out = 409, map[string]any{"code": "legacy_operation_requires_recovery", "error": "原消息已有旧版发送记录，请先恢复原回执；不会分配新执行身份"}
+				return nil
+			}
+			var count, owned int
+			if err = s.db.QueryRow(`SELECT COUNT(*),COUNT(CASE WHEN owner=? THEN 1 END) FROM operations`, owner).Scan(&count, &owned); err != nil {
+				return err
+			}
+			if count >= 65536 || owned >= 4096 {
+				status, out = 429, map[string]any{"code": "operation_capacity", "error": "安全操作记录已达容量"}
+				return nil
+			}
+			id = uuid.NewString()
+			deadline = nowMs() + int64(10*time.Minute/time.Millisecond)
+			ticket = s.signTicket(executionTicket{Version: 2, OperationID: id, Owner: owner, Hash: hash, Deadline: deadline, Epoch: s.epoch})
+			_, err = s.db.Exec(`INSERT INTO operations(id,owner,intent,hash,deadline,ticket) VALUES(?,?,?,?,?,?)`, id, owner, req.RequestID, hash, deadline, ticket)
+			oldHash = hash
+		}
+		if err != nil {
+			return err
+		}
+		if oldHash != hash {
+			status, out = 409, map[string]any{"code": "request_id_conflict", "error": "同一意图不能更改内容"}
+			return nil
+		}
+		state := "prepared"
+		if deadline <= nowMs() {
+			state = "expired"
+		}
+		out = map[string]any{"ok": true, "operationId": id, "ticket": ticket, "dispatchNotAfter": deadline, "storageEpoch": s.epoch, "state": state}
+		return nil
+	})
+	if errors.Is(err, errStorageAuthorization) {
+		h.writeStorageAuthorizationError(w, r, "设备授权已失效")
 		return
-	}
-	var id, oldHash, ticket string
-	var deadline int64
-	err = s.db.QueryRow(`SELECT id,hash,deadline,ticket FROM operations WHERE owner=? AND intent=?`, owner, req.RequestID).Scan(&id, &oldHash, &deadline, &ticket)
-	if errors.Is(err, sql.ErrNoRows) {
-		if h.receipts.entries[shaHex(owner+"\x00"+req.RequestID)] != nil {
-			writeJSON(w, 409, map[string]any{"code": "legacy_operation_requires_recovery", "error": "原消息已有旧版发送记录，请先恢复原回执；不会分配新执行身份"})
-			return
-		}
-		var count, owned int
-		if err = s.db.QueryRow(`SELECT COUNT(*),COUNT(CASE WHEN owner=? THEN 1 END) FROM operations`, owner).Scan(&count, &owned); err != nil {
-			writeError(w, 503, "准备记录暂时不可用")
-			return
-		}
-		if count >= 65536 || owned >= 4096 {
-			writeJSON(w, 429, map[string]any{"code": "operation_capacity", "error": "安全操作记录已达容量"})
-			return
-		}
-		id = uuid.NewString()
-		deadline = nowMs() + int64(10*time.Minute/time.Millisecond)
-		ticket = s.signTicket(executionTicket{Version: 2, OperationID: id, Owner: owner, Hash: hash, Deadline: deadline, Epoch: s.epoch})
-		_, err = s.db.Exec(`INSERT INTO operations(id,owner,intent,hash,deadline,ticket) VALUES(?,?,?,?,?,?)`, id, owner, req.RequestID, hash, deadline, ticket)
-		oldHash = hash
 	}
 	if err != nil {
 		writeError(w, 503, "准备记录尚未保存，请重试同一意图")
 		return
 	}
-	if oldHash != hash {
-		writeJSON(w, 409, map[string]any{"code": "request_id_conflict", "error": "同一意图不能更改内容"})
+	_, current, ok := h.appStorageIdentity(acct, r, req.DeviceID)
+	if !ok || current != scope {
+		h.writeStorageAuthorizationError(w, r, "设备授权已失效")
 		return
 	}
-	state := "prepared"
-	if deadline <= nowMs() {
-		state = "expired"
-	}
-	writeJSON(w, 200, map[string]any{"ok": true, "operationId": id, "ticket": ticket, "dispatchNotAfter": deadline, "storageEpoch": s.epoch, "state": state})
+	writeJSON(w, status, out)
 }
 
 func (h *Hub) validateOperationCommit(w http.ResponseWriter, r *http.Request, acct string, req commandReq) (*http.Request, bool) {
@@ -200,27 +216,30 @@ func (h *Hub) validateOperationCommit(w http.ResponseWriter, r *http.Request, ac
 	return r.WithContext(context.WithValue(r.Context(), ticketDeadlineKey{}, t.Deadline)), true
 }
 
-func (h *Hub) operationAccess(acct string, r *http.Request, deviceID, id, ticket string) (executionTicket, string, bool) {
+func (h *Hub) operationAccess(acct string, r *http.Request, deviceID, id, ticket string) (executionTicket, string, string, bool) {
 	var empty executionTicket
 	s := h.durable
 	if s == nil {
-		return empty, "", false
+		return empty, "", "", false
 	}
-	actual, _, ok := h.appStorageIdentity(acct, r, deviceID)
+	actual, scope, ok := h.appStorageIdentity(acct, r, deviceID)
 	if !ok {
-		return empty, "", false
+		return empty, "", "", false
 	}
 	t, err := s.verifyTicket(ticket)
 	owner := shaHex(actual + "\x00" + deviceID + "\x00" + h.receiptCredential(actual, r))
 	if err != nil || t.OperationID != id || t.Owner != owner {
-		return empty, "", false
+		return empty, "", "", false
 	}
-	return t, shaHex(owner + "\x00" + id), true
+	return t, shaHex(owner + "\x00" + id), scope, true
 }
 func (h *Hub) handleOperationRead(w http.ResponseWriter, r *http.Request, acct string) {
 	q := r.URL.Query()
-	t, key, ok := h.operationAccess(acct, r, q.Get("deviceId"), q.Get("operationId"), q.Get("ticket"))
+	t, key, scope, ok := h.operationAccess(acct, r, q.Get("deviceId"), q.Get("operationId"), q.Get("ticket"))
 	if !ok {
+		if h.writeBotPhoneUnavailable(w, r) {
+			return
+		}
 		writeError(w, 403, "操作授权已失效")
 		return
 	}
@@ -274,6 +293,16 @@ func (h *Hub) handleOperationRead(w http.ResponseWriter, r *http.Request, acct s
 		writeError(w, 503, "回执暂时不可用")
 		return
 	}
+	// Receipt/storage waits can outlive a phone generation. Never release a
+	// completed result authorized only by the earlier request admission.
+	_, currentKey, currentScope, current := h.operationAccess(acct, r, q.Get("deviceId"), q.Get("operationId"), q.Get("ticket"))
+	if !current || currentKey != key || currentScope != scope {
+		if h.writeBotPhoneUnavailable(w, r) {
+			return
+		}
+		writeError(w, http.StatusForbidden, "操作授权已失效")
+		return
+	}
 	writeJSON(w, 200, out)
 }
 func (h *Hub) handleOperationAck(w http.ResponseWriter, r *http.Request, acct string) {
@@ -285,29 +314,49 @@ func (h *Hub) handleOperationAck(w http.ResponseWriter, r *http.Request, acct st
 	if !decodeBody(w, r, 4096, &in) {
 		return
 	}
-	_, key, ok := h.operationAccess(acct, r, in.DeviceID, in.OperationID, in.Ticket)
+	_, key, scope, ok := h.operationAccess(acct, r, in.DeviceID, in.OperationID, in.Ticket)
 	if !ok {
+		if h.writeBotPhoneUnavailable(w, r) {
+			return
+		}
 		writeError(w, 403, "操作授权已失效")
 		return
 	}
 	s := h.durable
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, err := s.db.Exec(`UPDATE replies SET expires=MIN(expires,?) WHERE id=? AND state='completed'`, nowMs()+durableDay, key); err != nil {
-		writeError(w, 503, "确认尚未保存")
-		return
-	}
-	var expires int64
-	var scope string
-	if s.db.QueryRow(`SELECT scope FROM quota_owners WHERE owner=(SELECT owner FROM replies WHERE id=?)`, key).Scan(&scope) == nil {
-		if _, err := s.db.Exec(`UPDATE blob_refs SET expires=MIN(expires,?) WHERE scope=? AND ref=?`, nowMs()+durableDay, scope, "operation:"+in.OperationID); err != nil {
-			writeError(w, 503, "图片引用确认尚未保存")
+	out, status := func() (map[string]any, int) {
+		// Match the event-write lock order (Hub -> durable store). The final
+		// scope check and expiry mutation form one authorization boundary;
+		// a reset cannot replace the phone between them. Network writes happen
+		// outside both locks, so a slow client cannot block phone revocation.
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		actual, dev := h.botAccountAndDeviceLocked(acct, r, in.DeviceID)
+		if dev == nil || !h.appAuthorizedDeviceLocked(acct, r, in.DeviceID) || h.durableScopeLocked(actual, dev) != scope {
+			return nil, http.StatusForbidden
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if _, err := s.db.Exec(`UPDATE replies SET expires=MIN(expires,?) WHERE id=? AND state='completed'`, nowMs()+durableDay, key); err != nil {
+			return map[string]any{"error": "确认尚未保存"}, http.StatusServiceUnavailable
+		}
+		var expires int64
+		var storedScope string
+		if s.db.QueryRow(`SELECT scope FROM quota_owners WHERE owner=(SELECT owner FROM replies WHERE id=?)`, key).Scan(&storedScope) == nil {
+			if _, err := s.db.Exec(`UPDATE blob_refs SET expires=MIN(expires,?) WHERE scope=? AND ref=?`, nowMs()+durableDay, storedScope, "operation:"+in.OperationID); err != nil {
+				return map[string]any{"error": "图片引用确认尚未保存"}, http.StatusServiceUnavailable
+			}
+		}
+		if s.db.QueryRow(`SELECT expires FROM replies WHERE id=?`, key).Scan(&expires) != nil {
+			return map[string]any{"code": "command_receipt_pending", "error": "尚无完整回执可确认"}, http.StatusConflict
+		}
+		return map[string]any{"ok": true, "operationId": in.OperationID, "retainedUntil": expires}, http.StatusOK
+	}()
+	if out == nil {
+		if h.writeBotPhoneUnavailable(w, r) {
 			return
 		}
-	}
-	if s.db.QueryRow(`SELECT expires FROM replies WHERE id=?`, key).Scan(&expires) != nil {
-		writeJSON(w, 409, map[string]any{"code": "command_receipt_pending", "error": "尚无完整回执可确认"})
+		writeError(w, http.StatusForbidden, "操作授权已失效")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "operationId": in.OperationID, "retainedUntil": expires})
+	writeJSON(w, status, out)
 }

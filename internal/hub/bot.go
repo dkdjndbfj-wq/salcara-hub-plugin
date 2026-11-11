@@ -46,22 +46,22 @@ type botGroup struct {
 	InviteHash       string
 	SignatureKeyHash string
 	Revoked          bool
-	PhoneIDHash      string
-	PhoneTokenHash   string
-	Computers        map[string]bool
-	CreatedAt        int64
+	botPhoneState
+	PhonePending bool
+	phoneIntent  *botPhoneIntent
+	Computers    map[string]bool
+	CreatedAt    int64
 }
 
 type persistedBotGroup struct {
 	ID         string `json:"id"`
 	InviteHash string `json:"inviteHash"`
 	// Kept for reading pre-HMAC Bot state. New groups use the state signing key.
-	SignatureKeyHash string   `json:"signatureKeyHash,omitempty"`
-	Revoked          bool     `json:"revoked,omitempty"`
-	PhoneIDHash      string   `json:"phoneIdHash,omitempty"`
-	PhoneTokenHash   string   `json:"phoneTokenHash,omitempty"`
-	Computers        []string `json:"computers,omitempty"`
-	CreatedAt        int64    `json:"createdAt"`
+	SignatureKeyHash string `json:"signatureKeyHash,omitempty"`
+	Revoked          bool   `json:"revoked,omitempty"`
+	botPhoneState
+	Computers []string `json:"computers,omitempty"`
+	CreatedAt int64    `json:"createdAt"`
 }
 
 type persistedBotState struct {
@@ -128,7 +128,7 @@ func (h *Hub) loadBotState() error {
 	var st persistedBotState
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&st); err != nil || st.Version != 1 || d.Decode(new(any)) != io.EOF {
+	if err := d.Decode(&st); err != nil || !uniqueBotJSON(b) || st.Version != 1 || d.Decode(new(any)) != io.EOF {
 		return errors.New("invalid bot-groups.json")
 	}
 	var signingKey []byte
@@ -146,7 +146,14 @@ func (h *Hub) loadBotState() error {
 		if !validID(p.ID) || !validHex(p.InviteHash, 32) || (p.SignatureKeyHash != "" && !validHex(p.SignatureKeyHash, 32)) || p.CreatedAt <= 0 || len(p.Computers) > maxBotComputers {
 			return errors.New("invalid bot group record")
 		}
-		g := &botGroup{ID: p.ID, InviteHash: p.InviteHash, SignatureKeyHash: p.SignatureKeyHash, Revoked: p.Revoked, PhoneIDHash: p.PhoneIDHash, PhoneTokenHash: p.PhoneTokenHash, CreatedAt: p.CreatedAt, Computers: map[string]bool{}}
+		g := &botGroup{ID: p.ID, InviteHash: p.InviteHash, SignatureKeyHash: p.SignatureKeyHash, Revoked: p.Revoked, botPhoneState: p.botPhoneState, CreatedAt: p.CreatedAt, Computers: map[string]bool{}}
+		if g.PhoneRevision == "" {
+			// Stable migration for pre-v2 records, including empty groups.
+			g.PhoneRevision = hashText("salcara-bot-phone-legacy-v1\x00" + g.ID + "\x00" + g.PhoneTokenHash)[:32]
+		}
+		if !validBotPhoneState(g.botPhoneState) {
+			return errors.New("invalid bot phone lifecycle")
+		}
 		if g.PhoneIDHash != "" && !validHex(g.PhoneIDHash, 32) || g.PhoneTokenHash != "" && !validHex(g.PhoneTokenHash, 32) {
 			return errors.New("invalid bot phone credential")
 		}
@@ -161,15 +168,22 @@ func (h *Hub) loadBotState() error {
 		}
 		h.botGroups[g.ID] = g
 	}
+	if !h.botTokenOwnersValidLocked() {
+		return errors.New("ambiguous bot phone credential")
+	}
 	return nil
 }
 
 func (h *Hub) botSnapshot() persistedBotState {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.botSnapshotLocked()
+}
+
+func (h *Hub) botSnapshotLocked() persistedBotState {
 	st := persistedBotState{Version: 1, SigningKey: hex.EncodeToString(h.botSigningKey)}
 	for _, g := range h.botGroups {
-		p := persistedBotGroup{ID: g.ID, InviteHash: g.InviteHash, SignatureKeyHash: g.SignatureKeyHash, Revoked: g.Revoked, PhoneIDHash: g.PhoneIDHash, PhoneTokenHash: g.PhoneTokenHash, CreatedAt: g.CreatedAt}
+		p := persistedBotGroup{ID: g.ID, InviteHash: g.InviteHash, SignatureKeyHash: g.SignatureKeyHash, Revoked: g.Revoked, botPhoneState: g.botPhoneState, CreatedAt: g.CreatedAt}
 		for id := range g.Computers {
 			p.Computers = append(p.Computers, id)
 		}
@@ -220,14 +234,12 @@ func (h *Hub) saveBotStateError() error {
 	}
 	h.saveMu.Lock()
 	defer h.saveMu.Unlock()
-	b, err := json.Marshal(h.botSnapshot())
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(h.cfg.DataDir+"/"+botGroupFile, b, 0o600)
+	return h.writeBotSnapshot(h.botSnapshot())
 }
 
 func (h *Hub) CreateBotBindingPackage() (BotBindingPackage, error) {
+	h.enrollmentMu.Lock()
+	defer h.enrollmentMu.Unlock()
 	if h.cfg.DeploymentMode != "bot" {
 		return BotBindingPackage{}, errors.New("bot bindings require bot deployment")
 	}
@@ -243,7 +255,7 @@ func (h *Hub) CreateBotBindingPackage() (BotBindingPackage, error) {
 	p.Signature = h.signBotPackage(p)
 	// The invite is the scoped bearer credential. The package signature is a
 	// Hub-issued HMAC over the complete package metadata and is verified below.
-	g := &botGroup{ID: groupID, InviteHash: hashText(invite), CreatedAt: time.Now().UnixMilli(), Computers: map[string]bool{}}
+	g := &botGroup{ID: groupID, InviteHash: hashText(invite), botPhoneState: botPhoneState{PhoneRevision: groupID}, CreatedAt: time.Now().UnixMilli(), Computers: map[string]bool{}}
 	h.mu.Lock()
 	h.botGroups[groupID] = g
 	h.mu.Unlock()
@@ -257,17 +269,26 @@ func (h *Hub) CreateBotBindingPackage() (BotBindingPackage, error) {
 }
 
 func (h *Hub) RevokeBotGroup(groupID string) error {
+	h.enrollmentMu.Lock()
+	defer h.enrollmentMu.Unlock()
 	h.mu.Lock()
 	g := h.botGroups[groupID]
 	if g == nil {
 		h.mu.Unlock()
-		return errors.New("bot group not found")
+		return ErrBotPhoneNotFound
+	}
+	if g.PhonePending {
+		h.mu.Unlock()
+		return ErrBotPhoneUnavailable
 	}
 	g.Revoked = true
 	// Invite revocation stops new bindings only. Existing phone and computer
 	// credentials remain valid until their own explicit revocation.
 	h.mu.Unlock()
-	return h.saveBotStateError()
+	if h.saveBotStateError() != nil {
+		return ErrBotPhoneUnavailable
+	}
+	return nil
 }
 
 func (h *Hub) BotGroupSummaries() []map[string]any {
@@ -275,14 +296,14 @@ func (h *Hub) BotGroupSummaries() []map[string]any {
 	defer h.mu.Unlock()
 	out := make([]map[string]any, 0, len(h.botGroups))
 	for _, g := range h.botGroups {
-		out = append(out, map[string]any{"groupId": g.ID, "revoked": g.Revoked, "computers": len(g.Computers), "phoneBound": g.PhoneTokenHash != "", "createdAt": g.CreatedAt})
+		out = append(out, map[string]any{"groupId": g.ID, "revoked": g.Revoked, "computers": len(g.Computers), "phoneBound": g.PhoneTokenHash != "" && !g.PhonePending, "createdAt": g.CreatedAt, "phoneRevision": g.PhoneRevision, "phonePending": g.PhonePending})
 	}
 	return out
 }
 
 func (h *Hub) botGroupForPackageLocked(p BotBindingPackage) *botGroup {
 	g := h.botGroups[p.GroupID]
-	if g == nil || g.Revoked || hashText(p.Invite) != g.InviteHash {
+	if g == nil || g.PhonePending || g.Revoked || hashText(p.Invite) != g.InviteHash {
 		return nil
 	}
 	if !h.verifyBotPackageSignatureLocked(p) && (g.SignatureKeyHash == "" || hashText(p.Signature) != g.SignatureKeyHash) {
@@ -319,11 +340,11 @@ func decodeStrictBotBody(r *http.Request, out any) bool {
 }
 
 func botTokenHash(r *http.Request) ([32]byte, bool) {
-	v := strings.TrimSpace(r.Header.Get("X-Salcara-Bot-Token"))
-	if !validHex(v, 32) {
+	values := r.Header.Values("X-Salcara-Bot-Token")
+	if len(values) != 1 || !validHex(values[0], 32) || values[0] != strings.ToLower(values[0]) {
 		return [32]byte{}, false
 	}
-	return sha256.Sum256([]byte(v)), true
+	return sha256.Sum256([]byte(values[0])), true
 }
 
 func (h *Hub) botGroupForTokenLocked(r *http.Request) *botGroup {
@@ -332,7 +353,7 @@ func (h *Hub) botGroupForTokenLocked(r *http.Request) *botGroup {
 		return nil
 	}
 	for _, g := range h.botGroups {
-		if g.PhoneTokenHash != "" && subtleConstantTimeEqual(hashTextBytes(hash), g.PhoneTokenHash) {
+		if !g.PhonePending && g.PhoneTokenHash != "" && subtleConstantTimeEqual(hashTextBytes(hash), g.PhoneTokenHash) {
 			return g
 		}
 	}
@@ -402,54 +423,6 @@ func (h *Hub) handleBotComputerBind(w http.ResponseWriter, r *http.Request, _ st
 	writeJSON(w, 200, map[string]any{"ok": true, "groupId": g.ID, "device": status, "eventScopeRequired": h.cfg.DeploymentMode == "bot", "eventScope": h.bridgeEventScope(acct, id)})
 }
 
-func (h *Hub) handleBotPhoneBind(w http.ResponseWriter, r *http.Request, _ string) {
-	var in struct {
-		Binding BotBindingPackage `json:"binding"`
-		PhoneID string            `json:"phoneId"`
-	}
-	if !decodeStrictBotBody(r, &in) || !validBotPackage(in.Binding) || !validHex(in.PhoneID, 32) || !validateBotHubURL(in.Binding.HubURL, h.cfg.PublicURL) {
-		writeError(w, 400, "绑定包或手机身份无效")
-		return
-	}
-	token, err := randomHex(32)
-	if err != nil {
-		writeError(w, 500, "无法生成手机凭据")
-		return
-	}
-	hash := sha256.Sum256([]byte(token))
-	phoneHash := hashText(in.PhoneID)
-	h.mu.Lock()
-	g := h.botGroupForPackageLocked(in.Binding)
-	if g == nil {
-		h.mu.Unlock()
-		writeError(w, 403, "绑定包无效、已撤销或已过期")
-		return
-	}
-	if g.PhoneTokenHash != "" {
-		h.mu.Unlock()
-		writeError(w, 409, "该 Bot 组已绑定手机")
-		return
-	}
-	g.PhoneIDHash, g.PhoneTokenHash = phoneHash, hex.EncodeToString(hash[:])
-	devices := h.botDevicesLocked(g)
-	h.mu.Unlock()
-	if err := h.saveBotStateError(); err != nil {
-		// Do not consume the group's single phone slot when the durable commit
-		// failed. Keep a concurrent revoke or replacement untouched.
-		h.mu.Lock()
-		if current := h.botGroups[g.ID]; current == g && current.PhoneIDHash == phoneHash && current.PhoneTokenHash == hex.EncodeToString(hash[:]) {
-			current.PhoneIDHash, current.PhoneTokenHash = "", ""
-		}
-		h.mu.Unlock()
-		writeError(w, 503, "手机绑定尚未保存，请重试")
-		return
-	}
-	h.mu.Lock()
-	h.notifyBotScopeChangedLocked(g)
-	h.mu.Unlock()
-	writeJSON(w, 200, map[string]any{"ok": true, "groupId": g.ID, "botToken": token, "devices": devices})
-}
-
 func (h *Hub) botDevicesLocked(g *botGroup) []DeviceStatus {
 	out := make([]DeviceStatus, 0, len(g.Computers))
 	for id := range g.Computers {
@@ -460,24 +433,6 @@ func (h *Hub) botDevicesLocked(g *botGroup) []DeviceStatus {
 		}
 	}
 	return out
-}
-
-func (h *Hub) handleBotPhoneRevoke(w http.ResponseWriter, r *http.Request, _ string) {
-	h.mu.Lock()
-	g := h.botGroupForTokenLocked(r)
-	if g == nil {
-		h.mu.Unlock()
-		writeError(w, 403, "Bot 手机凭据已失效")
-		return
-	}
-	g.PhoneIDHash, g.PhoneTokenHash = "", ""
-	h.notifyBotScopeChangedLocked(g)
-	h.mu.Unlock()
-	if err := h.saveBotStateError(); err != nil {
-		writeError(w, 503, "撤销状态尚未保存，请重试")
-		return
-	}
-	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 func (h *Hub) botAccountAndDeviceLocked(acct string, r *http.Request, deviceID string) (string, *device) {
@@ -516,7 +471,7 @@ func (h *Hub) botSourceBindingLocked(acct string, dev *device) string {
 	}
 	groupID := strings.TrimPrefix(acct, "bot:")
 	g := h.botGroups[groupID]
-	if g == nil || !g.Computers[dev.info.DeviceID] || g.PhoneTokenHash == "" || g.PhoneIDHash == "" {
+	if g == nil || g.PhonePending || !g.Computers[dev.info.DeviceID] || g.PhoneTokenHash == "" || g.PhoneIDHash == "" {
 		return ""
 	}
 	scope := h.durableScopeLocked(deviceAccount(dev.info.DeviceID), dev)
