@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set +x
 set -Eeuo pipefail
 umask 077
 
@@ -77,7 +78,7 @@ else
 fi
 healthy=false
 for attempt in {1..30}; do
-    if health=$(curl --fail --silent --show-error --max-time 2 'http://127.0.0.1:8787/healthz' 2>/dev/null) &&
+    if health=$(curl --disable --fail --silent --show-error --max-time 2 'http://127.0.0.1:8787/healthz' 2>/dev/null) &&
         printf '%s\n' "$health" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"salcara-hub-standalone"' &&
         printf '%s\n' "$health" | grep -Eq '"version"[[:space:]]*:[[:space:]]*"0\.5\.4"' &&
         printf '%s\n' "$health" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
@@ -87,22 +88,22 @@ for attempt in {1..30}; do
 done
 [[ "$healthy" == true ]] || fail '未确认 Bot 版本本地健康；不会生成绑定包。'
 
-public_ping=$(curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 10 "$public_url/v1/ping") || fail '公开 HTTPS /v1/ping 不可用；修复反代后再次续跑。'
-grep -Eq '"service"[[:space:]]*:[[:space:]]*"salcara-hub"' <<< "$public_ping" || fail '公开 HTTPS 地址未转发到 Salcara Hub。'
-stream_status=$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-time 10 -o /dev/null -w '%{http_code}' "$public_url/v1/bridge/stream?deviceId=00000000-0000-4000-8000-000000000000") || fail '无法探测 Bridge 流式入口。'
-[[ "$stream_status" == 400 || "$stream_status" == 403 ]] || fail "Bridge 流式入口返回 HTTP $stream_status。"
-event_status=$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-time 10 -o /dev/null -w '%{http_code}' "$public_url/v1/app/events?deviceId=00000000-0000-4000-8000-000000000000&scope=device&wait=1") || fail '无法探测 App 长轮询入口。'
-[[ "$event_status" == 400 || "$event_status" == 403 ]] || fail "App 长轮询入口返回 HTTP $event_status。"
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+route_script="$script_dir/check-bot-routes.sh"
+[[ -f "$route_script" && ! -L "$route_script" ]] || fail '缺少当前版本路由检查脚本；请从已审阅源码目录运行 resume-bot.sh，不覆盖原数据。'
+bash "$route_script" --install-dir "$install_dir" || fail '无凭据路由探测未完成；修复后可对原数据卷续跑。'
 
-mkdir -p -- "$install_dir/secrets"
-[[ ! -L "$install_dir/secrets" ]] || fail 'secrets 路径不能是符号链接。'
-chmod 700 -- "$install_dir/secrets"
-if [[ ! -f "$install_dir/secrets/admin-initial-login.txt" ]]; then
-    compose cp hub:/data/admin-initial-login.txt "$install_dir/secrets/admin-initial-login.txt" >/dev/null || fail '无法安全恢复初始管理密钥副本。'
-    chmod 600 -- "$install_dir/secrets/admin-initial-login.txt"
+if [[ ! -e "$install_dir/bot-binding.json" && ! -L "$install_dir/bot-binding.json" && ! -e "$install_dir/.bot-binding-pending" && ! -L "$install_dir/.bot-binding-pending" ]]; then
+    [[ ! -L "$install_dir/secrets" ]] || fail 'secrets 路径不能是符号链接。'
+    mkdir -p -- "$install_dir/secrets"
+    chmod 700 -- "$install_dir/secrets"
+    [[ ! -L "$install_dir/secrets/admin-initial-login.txt" ]] || fail '初始密钥文件不能是符号链接。'
+    if [[ ! -f "$install_dir/secrets/admin-initial-login.txt" ]]; then
+        compose cp hub:/data/admin-initial-login.txt "$install_dir/secrets/admin-initial-login.txt" >/dev/null || fail '无法安全恢复初始管理密钥副本；若用户已更换密钥，请在管理页生成绑定包。'
+        chmod 600 -- "$install_dir/secrets/admin-initial-login.txt"
+    fi
 fi
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 binding_script="$script_dir/create-bot-binding.sh"
 if [[ ! -f "$binding_script" || -L "$binding_script" ]]; then
     source_dir=$(cd -- "$script_dir/../.." && pwd -P)
@@ -110,4 +111,4 @@ if [[ ! -f "$binding_script" || -L "$binding_script" ]]; then
 fi
 [[ -f "$binding_script" && ! -L "$binding_script" ]] || fail '找不到安全的 Bot 绑定包签发脚本。'
 binding=$(bash "$binding_script" --install-dir "$install_dir") || fail '绑定包签发未确认；容器、卷和其他状态均已保留。'
-printf '\nBot Hub 已通过本地健康、公开 HTTPS、Bridge 流式和 App 长轮询检查。电脑与手机导入同一绑定 JSON：\n%s\n' "$binding"
+printf '\nBot 本地健康与无凭据路由探测已完成；SSE/长轮询传输及真实任务仍待验收。\n敏感绑定包文件：%s（0600；仅由用户安全导入，不粘贴到聊天或日志）。\n复用文件仅检查本地格式，不证明签名或邀请仍有效。\n' "$binding"

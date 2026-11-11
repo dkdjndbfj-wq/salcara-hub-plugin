@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # First installation only. Run a reviewed local checkout, never curl | sh.
 # No Docker/Nginx installation, daemon restart, existing-data cleanup or secrets output.
+set +x
 set -Eeuo pipefail
 umask 077
 
@@ -170,7 +171,7 @@ fi
 # Registry mode requires a public stable Release. Source mode is an explicit,
 # auditable fallback for a clean, committed Bot source revision.
 if [[ "$source_build" == false ]]; then
-    release=$(curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 30 \
+    release=$(curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 30 \
         "https://api.github.com/repos/dkdjndbfj-wq/salcara-hub-plugin/releases/tags/standalone-v$version") || die '正式 Release 不存在或不可达。'
     grep -Eq "\"tag_name\"[[:space:]]*:[[:space:]]*\"standalone-v${version_pattern}\"" <<< "$release" || die 'Release 标签不匹配。'
     grep -Eq '"draft"[[:space:]]*:[[:space:]]*false' <<< "$release" || die '不是公开正式 Release。'
@@ -200,11 +201,12 @@ cp -- "$source_dir/deploy/standalone/nginx-location.conf" "$install_dir/nginx-lo
 if [[ "$mode" == bot ]]; then
     cp -- "$source_dir/deploy/standalone/create-bot-binding.sh" "$install_dir/create-bot-binding.sh"
     cp -- "$source_dir/deploy/standalone/resume-bot.sh" "$install_dir/resume-bot.sh"
+    cp -- "$source_dir/deploy/standalone/check-bot-routes.sh" "$install_dir/check-bot-routes.sh"
 fi
 printf 'SALCARA_HUB_PUBLIC_URL=%s\nSALCARA_HUB_IMAGE_VERSION=%s\nSALCARA_HUB_MODE=%s\nSALCARA_HUB_DATA_VOLUME=%s\nSALCARA_HUB_PROJECT=%s\nSALCARA_HUB_BUILD_MODE=%s\nSALCARA_HUB_SOURCE_COMMIT=%s\nSALCARA_HUB_LOCAL_IMAGE_ID=%s\nSALCARA_HUB_DISABLE_UPDATES=false\n' \
     "$public_url" "$version" "$mode" "$volume" "$project" "$build_mode" "$source_commit" "$local_image_id" > "$install_dir/.env"
 chmod 600 -- "$install_dir/.env" "$install_dir/compose.release.yml" "$install_dir/nginx-location.conf"
-if [[ "$mode" == bot ]]; then chmod 600 -- "$install_dir/create-bot-binding.sh" "$install_dir/resume-bot.sh"; fi
+if [[ "$mode" == bot ]]; then chmod 600 -- "$install_dir/create-bot-binding.sh" "$install_dir/resume-bot.sh" "$install_dir/check-bot-routes.sh"; fi
 if [[ "$build_mode" == source ]]; then
     docker save "$image" | gzip -1 > "$install_dir/bot-image.tar.gz" || die '无法保存源码构建镜像；部署尚未初始化。'
     [[ -s "$install_dir/bot-image.tar.gz" ]] || die '源码构建镜像归档为空；部署尚未初始化。'
@@ -228,7 +230,7 @@ compose up -d --no-deps --pull never hub || die 'Hub 启动失败；已保留初
 
 healthy=false
 for attempt in {1..15}; do
-    if health=$(curl --fail --silent --show-error --max-time 2 'http://127.0.0.1:8787/healthz' 2>/dev/null) &&
+    if health=$(curl --disable --fail --silent --show-error --max-time 2 'http://127.0.0.1:8787/healthz' 2>/dev/null) &&
        printf '%s\n' "$health" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"salcara-hub-standalone"' &&
        printf '%s\n' "$health" | grep -Eq "\"version\"[[:space:]]*:[[:space:]]*\"${version_pattern}\"" &&
        printf '%s\n' "$health" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
@@ -239,24 +241,15 @@ done
 [[ "$healthy" == true ]] || die "未确认 $version 本地健康；不输出部署完成提示。"
 
 if [[ "$mode" == bot ]]; then
-    # Bot credentials are useful only when computers and phones can reach the
-    # configured public route. Probe each unauthenticated boundary before
-    # declaring the deployment ready; an auth failure is expected, a 404 is a
-    # misrouted reverse proxy. The proxy snippet separately disables buffering
-    # and keeps connections open for SSE and long-poll traffic.
-    public_ping=$(curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 10 "$public_url/v1/ping") || die 'Bot 模式的公开 HTTPS 地址无法访问 /v1/ping；不会报告安装完成。'
-    grep -Eq '"service"[[:space:]]*:[[:space:]]*"salcara-hub"' <<< "$public_ping" || die '公开 HTTPS 地址没有转发到 Salcara Hub。'
-    stream_status=$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-time 10 -o /dev/null -w '%{http_code}' "$public_url/v1/bridge/stream?deviceId=00000000-0000-4000-8000-000000000000") || die 'Bot 模式无法探测公开 Bridge 流式入口。'
-    [[ "$stream_status" == 400 || "$stream_status" == 403 ]] || die "公开 Bridge 流式入口返回 $stream_status；请检查反代路径和认证转发。"
-    event_status=$(curl --silent --show-error --proto '=https' --tlsv1.2 --max-time 10 -o /dev/null -w '%{http_code}' "$public_url/v1/app/events?deviceId=00000000-0000-4000-8000-000000000000&scope=device&wait=1") || die 'Bot 模式无法探测公开 App 长轮询入口。'
-    [[ "$event_status" == 400 || "$event_status" == 403 ]] || die "公开 App 长轮询入口返回 $event_status；请检查反代路径和认证转发。"
+    bash "$install_dir/check-bot-routes.sh" --install-dir "$install_dir" || die 'Bot 无凭据路由探测未完成；保留原部署，修复反代后续跑。'
 fi
 
 mkdir -m 700 -- "$install_dir/secrets"
 compose cp hub:/data/admin-initial-login.txt "$install_dir/secrets/admin-initial-login.txt" >/dev/null || die '无法安全导出初始管理密钥。'
 chmod 600 -- "$install_dir/secrets/admin-initial-login.txt"
 if [[ "$mode" == bot ]]; then
-    bash "$install_dir/create-bot-binding.sh" --install-dir "$install_dir" || die 'Hub 已启动，但绑定包签发未确认；保留现场并使用续跑命令。'
+    binding_path=$(bash "$install_dir/create-bot-binding.sh" --install-dir "$install_dir") || die 'Hub 已启动，但绑定包签发未确认；保留现场，结果未知时按管理页核对，不能自动重复签发。'
+    printf '敏感绑定包已保存：%s（0600；仅由用户安全导入，不粘贴到聊天或日志）。\nBot 传输及任务验收尚未完成；绑定文件存在不等于邀请仍有效。\n' "$binding_path"
 fi
 finished=true
 printf '\n%s\n' \
