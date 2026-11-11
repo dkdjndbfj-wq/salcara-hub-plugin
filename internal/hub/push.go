@@ -1,8 +1,6 @@
 package hub
 
 import (
-	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -12,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
 /*
@@ -27,15 +24,14 @@ When the computer reports that a turn completed or failed, or a final assistant
 reply, the Hub sends one generic push. It carries no task text: only the kind,
 agent and ids needed to open the thread. Android writes its own notification;
 iOS receives a generic APNs alert through FCM. The receiving app suppresses
-system banners while foregrounded. Approvals and questions stay in the
-conversation; retries are deduped.
+system banners while foregrounded. Approvals/questions have their own identities
+and resolved events silently cancel them; no push authorizes a response.
 */
 
 const (
-	pushTokensFile   = "push-tokens.json"
-	maxPushToken     = 4096
-	pushDedupeWindow = 10 * time.Minute
-	pushQueueSize    = 256
+	pushTokensFile = "push-tokens.json"
+	maxPushToken   = 4096
+	pushQueueSize  = 256
 )
 
 type pushEntry struct {
@@ -44,10 +40,13 @@ type pushEntry struct {
 	Platform          string `json:"platform"`
 	NotificationScope string `json:"notificationScope,omitempty"`
 	UpdatedAt         int64  `json:"updatedAt"`
-	revision          uint64 // process-local; queued jobs never survive a restart
+	revision          uint64 // process-local; durable jobs rebind only exact stable registrations
 }
 
 type pushJob struct {
+	dedupe    string
+	noticeKey string
+	noticeRef string
 	durableID string
 	key       string
 	account   string
@@ -57,25 +56,20 @@ type pushJob struct {
 	data      map[string]string
 }
 
-type turnNotice struct {
-	at int64
-}
-
 type pushState struct {
 	sender *fcmSender
 	path   string
 	logger *slog.Logger
 
-	mu          sync.Mutex
-	entries     map[string]pushEntry  // pairKey(account, device)
-	recent      map[string]int64      // dedupe key -> unix ms
-	turnNotices map[string]turnNotice // completion and final reply share one notice per turn
-	queue       chan pushJob
-	revision    uint64
+	mu       sync.Mutex
+	entries  map[string]pushEntry // pairKey(account, device)
+	notices  map[string]*pushNoticeSession
+	queue    chan pushJob
+	revision uint64
 }
 
 func newPushState(cfg *Config) (*pushState, error) {
-	p := &pushState{entries: map[string]pushEntry{}, recent: map[string]int64{}, turnNotices: map[string]turnNotice{}, queue: make(chan pushJob, pushQueueSize), logger: cfg.Logger}
+	p := &pushState{entries: map[string]pushEntry{}, notices: map[string]*pushNoticeSession{}, queue: make(chan pushJob, pushQueueSize), logger: cfg.Logger}
 	if len(cfg.FCMCredentials) > 0 {
 		sender, err := newFCMSender(cfg.FCMCredentials, cfg.HTTPClient)
 		if err != nil {
@@ -170,6 +164,15 @@ func (p *pushState) dropIfCurrent(job pushJob) {
 	}
 }
 
+func (p *pushState) unregisterScope(key, scope string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if current, ok := p.entries[key]; ok && (scope == "" || scope == current.NotificationScope) {
+		delete(p.entries, key)
+		p.saveLocked()
+	}
+}
+
 // ---------------------------------------------------------------------------
 // /app/push/register  {deviceId, token, platform, notificationScope}; an empty token unregisters.
 
@@ -216,7 +219,12 @@ func (h *Hub) handlePushRegister(w http.ResponseWriter, r *http.Request, acct st
 		writeError(w, http.StatusForbidden, "这台电脑尚未与手机配对")
 		return
 	}
-	pairHash := hex.EncodeToString(dev.pairHash[:])
+	pairHash := h.pushBindingLocked(acct, dev)
+	if pairHash == "" {
+		h.mu.Unlock()
+		writeError(w, http.StatusForbidden, "手机通知授权已失效")
+		return
+	}
 	if !h.push.enabled() {
 		h.mu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "push": "off"})
@@ -224,7 +232,7 @@ func (h *Hub) handlePushRegister(w http.ResponseWriter, r *http.Request, acct st
 	}
 	key := pairKey(acct, body.DeviceID)
 	if body.Token == "" {
-		h.push.set(key, nil)
+		h.push.unregisterScope(key, body.NotificationScope)
 	} else {
 		platform := body.Platform
 		if platform == "" {
@@ -265,141 +273,107 @@ func agentName(tool string) string {
 		return "Claude Code"
 	case "claude-desktop":
 		return "Claude Desktop"
+	case "deepseek":
+		return "DeepSeek"
+	case "hermes":
+		return "Hermes"
 	}
 	return "Agent"
 }
 
 func (h *Hub) pushEventLocked(acct string, a *account, dev *device, m map[string]json.RawMessage, seq int64) {
 	p := h.push
-	if !p.enabled() || dev == nil || !dev.hasPair || dev.banned || !h.managedPairAllowedLocked(dev) {
+	if !p.enabled() || dev == nil || !relevantPushEvent(m) {
 		return
 	}
-	typ, sessionKey := eventString(m, "type"), eventString(m, "sessionKey")
-	var kind, ref string
-	switch typ {
-	case "turn":
-		switch eventString(m, "status") {
-		case "completed":
-			kind = "done"
-		case "failed":
-			kind = "failed"
-		default:
-			return
-		}
-		ref = seqText(seq)
-		if turn := eventString(m, "turnId"); turn != "" {
-			ref = turn
-		}
-	case "message":
-		if eventString(m, "role") != "assistant" || !eventBool(m, "final") || eventString(m, "parentId") != "" || eventString(m, "messagePhase") == "commentary" {
-			return
-		}
-		kind = "reply"
-		ref = eventString(m, "id")
-		if ref == "" {
-			ref = seqText(seq)
-		}
-	default:
+	sessionKey := eventString(m, "sessionKey")
+	if sessionKey == "" || len(sessionKey) > 512 {
 		return
 	}
-	if sessionKey == "" {
-		return
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	noticeKey := shaHex(h.durableScopeLocked(acct, dev) + "\x00" + sessionKey)
+	state := h.pushNoticeLocked(noticeKey)
+	state.Decisions = map[string]pushNoticeDecision{}
+	kind, ref := state.observe(m, seq, nowMs())
+	h.enqueuePushJobs(h.pushJobsLocked(acct, a, dev, m, seq, noticeKey, kind, ref))
+}
+
+func (h *Hub) pushJobsLocked(acct string, a *account, dev *device, m map[string]json.RawMessage, seq int64, noticeKey, kind, ref string) []pushJob {
+	if kind == "" {
+		return nil
 	}
-	// Always enqueue eligible news. `lastAppSeen` is only a recent-request
-	// timestamp, not reliable foreground state: suppressing here can lose a
-	// short task that finishes just after the phone backgrounds. The Android
-	// receiver checks actual process foreground state before showing a banner.
-	key := pairKey(acct, dev.info.DeviceID)
-	pairHash := hex.EncodeToString(dev.pairHash[:])
+	sessionKey := eventString(m, "sessionKey")
+	var jobs []pushJob
 	tool := eventString(m, "tool")
 	if tool == "" && a != nil {
 		if s := a.sessions[sessionID(dev.info.DeviceID, sessionKey)]; s != nil {
 			tool = s.tool
 		}
 	}
-	now := nowMs()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	entry, ok := p.entries[key]
-	if !ok || entry.PairHash != pairHash {
-		return
-	}
-	turnID := eventString(m, "turnId")
-	turnNoticeKey := key + "\x00" + entry.PairHash + "\x00" + entry.NotificationScope + "\x00" + sessionKey + "\x00" + turnID
-	if turnID != "" {
-		if previous, exists := p.turnNotices[turnNoticeKey]; exists && now-previous.at < pushDedupeWindow.Milliseconds() {
-			return // one terminal/final notice per turn prevents repeated interruption.
+	for _, recipient := range h.pushAccountsLocked(acct, dev) {
+		key := pairKey(recipient, dev.info.DeviceID)
+		entry, ok := h.push.entries[key]
+		binding := h.pushBindingLocked(recipient, dev)
+		if !ok || binding == "" || entry.PairHash != binding {
+			continue
 		}
-	}
-	dedupe := key + "\x00" + entry.PairHash + "\x00" + entry.NotificationScope + "\x00" + sessionKey + "\x00" + kind + "\x00" + ref
-	if at, seen := p.recent[dedupe]; seen && now-at < pushDedupeWindow.Milliseconds() {
-		return
-	}
-	if len(p.recent) > 4096 {
-		for k, at := range p.recent {
-			if now-at >= pushDedupeWindow.Milliseconds() {
-				delete(p.recent, k)
+		lane := "task"
+		if kind == "approval" || kind == "question" || kind == "resolved" {
+			lane = "approval"
+		}
+		id := lane + ":" + dev.info.DeviceID + ":" + sessionKey + ":" + ref
+		if entry.NotificationScope != "" {
+			id = entry.NotificationScope + ":" + id
+		}
+		data := map[string]string{"type": "salcara.task", "kind": kind, "agent": agentName(tool),
+			"deviceId": dev.info.DeviceID, "sessionKey": sessionKey, "id": id,
+			"eventType": eventString(m, "type"), "seq": seqText(seq), "eventTs": seqText(eventMillis(m, "ts")), "ts": seqText(eventMillis(m, "ts"))}
+		if entry.NotificationScope != "" {
+			data["notificationScope"] = entry.NotificationScope
+		}
+		if lane == "approval" {
+			data["approvalId"] = ref
+			if expires := eventMillis(m, "expiresAt"); expires > 0 {
+				data["expiresAt"] = seqText(expires)
+			}
+		} else {
+			data["turnRef"] = ref
+		}
+		for _, field := range []string{"turnId", "status", "role", "messagePhase", "parentId"} {
+			if value := eventString(m, field); value != "" && len(value) <= 256 {
+				data[field] = value
 			}
 		}
+		if eventBool(m, "final") {
+			data["final"] = "true"
+		}
+		if value := eventString(m, "id"); value != "" && len(value) <= 256 {
+			data["eventId"] = value
+		}
+		job := pushJob{key: key, account: recipient, deviceID: dev.info.DeviceID, entry: entry, collapse: id, data: data, noticeKey: noticeKey, noticeRef: ref}
+		dedupe := key + "\x00" + entry.PairHash + "\x00" + entry.NotificationScope + "\x00" + sessionKey + "\x00" + lane + "\x00" + ref
+		// Upgrades retain presentation identity but cannot be consumed by an old job.
+		if kind == "failed" || kind == "resolved" {
+			dedupe += "\x00" + kind
+		}
+		job.dedupe = dedupe
+		jobs = append(jobs, job)
 	}
-	if len(p.turnNotices) > 4096 {
-		for k, notice := range p.turnNotices {
-			if now-notice.at >= pushDedupeWindow.Milliseconds() {
-				delete(p.turnNotices, k)
+	return jobs
+}
+
+func (h *Hub) enqueuePushJobs(jobs []pushJob) {
+	for _, job := range jobs {
+		select {
+		case h.push.queue <- job:
+		default:
+			if h.push.logger != nil {
+				h.push.logger.Warn("push queue full; durable retry required")
 			}
-		}
-		for k := range p.turnNotices {
-			if len(p.turnNotices) <= 4096 {
-				break
-			}
-			delete(p.turnNotices, k)
-		}
-	}
-	// All updates for the same turn share one notification identity. The first
-	// eligible final/terminal event owns the single alert for that turn.
-	turnRef := eventString(m, "turnId")
-	if turnRef == "" || len(turnRef) > 256 {
-		turnRef = seqText(seq)
-	}
-	notificationID := "task:" + dev.info.DeviceID + ":" + sessionKey + ":" + turnRef
-	job := pushJob{key: key, account: acct, deviceID: dev.info.DeviceID, entry: entry, collapse: "task:" + sessionKey + ":" + turnRef, data: map[string]string{
-		"type": "salcara.task", "kind": kind, "agent": agentName(tool),
-		"deviceId": dev.info.DeviceID, "sessionKey": sessionKey,
-		"id": notificationID,
-	}}
-	if entry.NotificationScope != "" {
-		job.data["notificationScope"] = entry.NotificationScope
-		job.collapse = entry.NotificationScope + ":" + job.collapse
-	}
-	if h.durable != nil {
-		durableDedupe := dedupe
-		if turnID != "" {
-			durableDedupe = turnNoticeKey
-		}
-		inserted, err := h.durable.savePush(&job, durableDedupe)
-		if err == nil && !inserted {
-			return
-		}
-		if err != nil {
-			job.durableID = ""
-			if p.logger != nil {
-				p.logger.Warn("push persistence unavailable")
-			}
-		}
-	}
-	select {
-	case p.queue <- job:
-		p.recent[dedupe] = now
-		if turnID != "" {
-			p.turnNotices[turnNoticeKey] = turnNotice{at: now}
-		}
-	default: // a burst beyond the queue is dropped rather than stalling event intake; a retry may enqueue it later.
-		if p.logger != nil {
-			p.logger.Warn("push queue full; event may be retried")
 		}
 	}
 }
-
 func seqText(n int64) string { return strconv.FormatInt(n, 10) }
 
 // Recheck both the pairing and the exact registration generation after queue
@@ -407,47 +381,20 @@ func seqText(n int64) string { return strconv.FormatInt(n, 10) }
 func (h *Hub) currentPushJob(job pushJob) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	a := h.accounts[job.account]
-	if a == nil {
-		return false
-	}
-	dev := a.devices[job.deviceID]
-	if dev == nil || !dev.hasPair || dev.banned || !h.managedPairAllowedLocked(dev) || hex.EncodeToString(dev.pairHash[:]) != job.entry.PairHash {
+	dev := h.pushDeviceLocked(job.account, job.deviceID)
+	if binding := h.pushBindingLocked(job.account, dev); binding == "" || binding != job.entry.PairHash {
 		return false
 	}
 	h.push.mu.Lock()
 	defer h.push.mu.Unlock()
 	entry, ok := h.push.entries[job.key]
-	return ok && entry == job.entry
-}
-
-// runPush sends queued messages until done is closed.
-func (h *Hub) runPush(done <-chan struct{}) {
-	p := h.push
-	retry := time.NewTicker(5 * time.Second)
-	defer retry.Stop()
-	for {
-		select {
-		case <-done:
-			return
-		case <-retry.C:
-			h.recoverPushJobs()
-		case job := <-p.queue:
-			if !h.currentPushJob(job) {
-				h.finishPush(job, false)
-				continue
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			err := p.sender.send(ctx, job.entry.Token, job.entry.Platform, job.data, job.collapse, func() bool { return h.currentPushJob(job) })
-			cancel()
-			if errors.Is(err, errPushTokenGone) {
-				p.dropIfCurrent(job)
-			} else if err != nil && h.cfg.Logger != nil {
-				h.cfg.Logger.Warn("push not delivered", "err", err)
-			}
-			h.finishPush(job, err != nil && !errors.Is(err, errPushTokenGone))
-		}
+	if !ok || entry != job.entry {
+		return false
 	}
+	if job.noticeKey != "" {
+		return h.pushNoticeLocked(job.noticeKey).permits(job, nowMs())
+	}
+	return true
 }
 
 // forgetPushLocked drops a computer's phone token when the computer is removed.

@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -167,6 +168,15 @@ func (s *fcmSender) accessToken(ctx context.Context) (string, error) {
 // send delivers one high-priority data message. Returns errPushTokenGone when
 // FCM reports the phone's token as unregistered or invalid.
 func (s *fcmSender) send(ctx context.Context, token string, platform string, data map[string]string, collapse string, current func() bool) error {
+	return s.sendPrepared(ctx, token, platform, func() (map[string]string, string, bool) {
+		return data, collapse, current == nil || current()
+	})
+}
+
+// prepare runs after OAuth, immediately before creating the FCM request. A
+// digest may lose individual tasks while waiting, so a boolean gate alone is
+// insufficient: its count and identity list must be rebuilt from live jobs.
+func (s *fcmSender) sendPrepared(ctx context.Context, token, platform string, prepare func() (map[string]string, string, bool)) error {
 	access, err := s.accessToken(ctx)
 	if err != nil {
 		return err
@@ -176,10 +186,14 @@ func (s *fcmSender) send(ctx context.Context, token string, platform string, dat
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if current != nil && !current() {
+	data, collapse, current := prepare()
+	now := time.Now()
+	if !current || !pushPayloadUnexpired(data, now) {
 		return nil
 	}
-	android := map[string]any{"priority": "HIGH", "ttl": "3600s"}
+	deadline := pushPayloadDeadline(data, now)
+	ttl := deadline.Sub(now).Milliseconds()
+	android := map[string]any{"priority": "HIGH", "ttl": fmt.Sprintf("%d.%03ds", ttl/1000, ttl%1000)}
 	if collapse != "" {
 		android["collapse_key"] = pushCollapseKey(collapse)
 	}
@@ -251,11 +265,47 @@ func apnsTaskConfig(data map[string]string, collapse string) map[string]any {
 		title, body = agent+" 完成了任务", "点按查看结果"
 	case "failed":
 		title, body = agent+" 的任务没有完成", "点按查看原因"
+	case "approval":
+		title, body = agent+" 需要批准", "点按查看待处理请求"
+	case "question":
+		title, body = agent+" 需要你回答", "点按查看问题"
+	}
+	if count, err := strconv.Atoi(data["notificationCount"]); err == nil && count > 1 && (data["kind"] == "done" || data["kind"] == "reply") {
+		title, body = strconv.Itoa(count)+" 项任务有结果", "点按查看任务结果"
 	}
 	aps := map[string]any{"alert": map[string]string{"title": title, "body": body}, "sound": "default"}
 	headers := map[string]string{"apns-priority": "10", "apns-push-type": "alert"}
+	if data["kind"] == "resolved" {
+		// This silent update can clear the app's own presentation state, but
+		// cannot reliably retract an APNs alert already shown while iOS is offline.
+		aps = map[string]any{"content-available": 1}
+		headers = map[string]string{"apns-priority": "5", "apns-push-type": "background"}
+	}
+	headers["apns-expiration"] = strconv.FormatInt(pushPayloadDeadline(data, time.Now()).Unix(), 10)
 	if collapse != "" {
 		headers["apns-collapse-id"] = pushCollapseKey(collapse)
 	}
 	return map[string]any{"headers": headers, "payload": map[string]any{"aps": aps}}
+}
+
+func pushPayloadUnexpired(data map[string]string, now time.Time) bool {
+	value := data["expiresAt"]
+	if value == "" {
+		return true
+	}
+	expires, err := strconv.ParseInt(value, 10, 64)
+	return err == nil && expires > now.UnixMilli()
+}
+
+func pushPayloadDeadline(data map[string]string, now time.Time) time.Time {
+	deadline := now.Add(time.Hour)
+	if expires, err := strconv.ParseInt(data["expiresAt"], 10, 64); err == nil && expires > 0 {
+		deadline = time.UnixMilli(expires)
+	}
+	// FCM accepts at most four weeks. The actual request deadline may be
+	// sooner; neither transport is allowed to extend that deadline.
+	if maximum := now.Add(28 * 24 * time.Hour); deadline.After(maximum) {
+		deadline = maximum
+	}
+	return deadline
 }

@@ -72,7 +72,7 @@ func (s *durableStore) findBatch(scope, id string) (eventBatchReceipt, bool, err
 	return out, err == nil, err
 }
 
-func (s *durableStore) storeEvents(scope, batch, digest string, events []*storedEvent) error {
+func (s *durableStore) storeEvents(scope, batch, digest string, events []*storedEvent, stage ...func(*sql.Tx) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var bytes int64
@@ -99,9 +99,18 @@ func (s *durableStore) storeEvents(scope, batch, digest string, events []*stored
 	}
 	defer tx.Rollback()
 	last := int64(0)
+	projectedSessions := map[string]bool{}
 	for _, e := range events {
 		var fields map[string]json.RawMessage
 		_ = json.Unmarshal(e.data, &fields)
+		if len(stage) > 0 {
+			if err = s.projectPushNotice(tx, scope, e, fields, !projectedSessions[e.sessionKey]); err != nil {
+				return err
+			}
+		}
+		if relevantPushEvent(fields) {
+			projectedSessions[e.sessionKey] = true
+		}
 		var typ string
 		_ = json.Unmarshal(fields["type"], &typ)
 		// Runtime terminal/browser frames and embedded images are not mailbox
@@ -171,6 +180,11 @@ func (s *durableStore) storeEvents(scope, batch, digest string, events []*stored
 	}
 	if batch != "" {
 		if _, err = tx.Exec(`INSERT INTO batches(scope,id,digest,accepted,last_seq) VALUES(?,?,?,?,?)`, scope, batch, digest, len(events), last); err != nil {
+			return err
+		}
+	}
+	for _, fn := range stage {
+		if err = fn(tx); err != nil {
 			return err
 		}
 	}

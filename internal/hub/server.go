@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -968,16 +969,27 @@ func (h *Hub) handleBridgeEvents(w http.ResponseWriter, r *http.Request, acct st
 			}
 			events = append(events, e)
 		}
-		if err := h.durable.storeEvents(h.durableScopeLocked(acct, dev), body.BatchID, digest, events); err != nil {
+		var pushJobs []pushJob
+		stagePush := func(tx *sql.Tx) error {
+			var err error
+			pushJobs, err = h.stagePushBatchLocked(tx, acct, a, dev, events)
+			return err
+		}
+		var stages []func(*sql.Tx) error
+		if h.push.enabled() {
+			stages = append(stages, stagePush)
+		}
+		if err := h.durable.storeEvents(h.durableScopeLocked(acct, dev), body.BatchID, digest, events, stages...); err != nil {
 			h.mu.Unlock()
 			writeJSON(w, 503, map[string]any{"code": "event_storage_unavailable", "error": "事件尚未保存，请保留本地批次后重试", "retryable": true})
 			return
 		}
+		h.invalidatePushBatchLocked(acct, dev, events)
 		for i, e := range events {
 			a.publishEventLocked(e, parsed[i])
 			last = e.seq
-			h.pushEventLocked(acct, a, dev, parsed[i], e.seq)
 		}
+		h.enqueuePushJobs(pushJobs)
 	} else {
 		for _, m := range parsed {
 			e, err := a.appendEventLocked(body.DeviceID, m)

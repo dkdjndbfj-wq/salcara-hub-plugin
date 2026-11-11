@@ -229,9 +229,9 @@ func TestPushSendsOneGenericMessagePerNews(t *testing.T) {
 	postTurn(t, h, "pc-push", secret, done) // the computer retried the upload
 	ask := map[string]any{"type": "approval.request", "sessionKey": "codex:s1", "tool": "codex", "approvalId": "ap-7", "kind": "command", "title": "rm -rf build", "detail": "private detail", "ts": time.Now().UnixMilli()}
 	postTurn(t, h, "pc-push", secret, ask)
-	msgs := waitMessages(t, google, 1)
-	if len(msgs) != 1 {
-		t.Fatalf("want exactly 1 message (final reply replaces completion, approval suppressed), got %d", len(msgs))
+	msgs := waitMessages(t, google, 2)
+	if len(msgs) != 2 {
+		t.Fatalf("want one final result plus one independent approval request, got %d", len(msgs))
 	}
 	first := msgs[0]["message"].(map[string]any)
 	data := first["data"].(map[string]any)

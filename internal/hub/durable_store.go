@@ -149,6 +149,7 @@ func newDurableStore(dataDir string) (_ *durableStore, err error) {
 		`CREATE TABLE IF NOT EXISTS blob_refs (scope TEXT NOT NULL, id TEXT NOT NULL, ref TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(scope,id,ref))`,
 		`CREATE TABLE IF NOT EXISTS offline_queue (id TEXT PRIMARY KEY, owner TEXT NOT NULL, scope TEXT NOT NULL, deadline INTEGER NOT NULL, state TEXT NOT NULL, body BLOB, bytes INTEGER NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS push_jobs (id TEXT PRIMARY KEY, body BLOB, state TEXT NOT NULL, due INTEGER NOT NULL, expires INTEGER NOT NULL, attempts INTEGER NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS push_notices (id TEXT PRIMARY KEY, body BLOB NOT NULL, expires INTEGER NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS thumbnails (id TEXT PRIMARY KEY, scope TEXT NOT NULL, body BLOB NOT NULL, bytes INTEGER NOT NULL, accessed INTEGER NOT NULL, expires INTEGER NOT NULL)`,
 	} {
 		if strings.HasPrefix(q, "CREATE ") {

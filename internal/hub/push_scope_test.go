@@ -42,7 +42,7 @@ func TestPushScopeUpdatesWithSameTokenAndSurvivesRestart(t *testing.T) {
 	if message["data"].(map[string]any)["notificationScope"] != notificationScopeB {
 		t.Fatal("push retained the old scope after registration updated")
 	}
-	collapse := notificationScopeB + ":task:codex:shared-id:first"
+	collapse := notificationScopeB + ":task:" + id + ":codex:shared-id:first"
 	if message["android"].(map[string]any)["collapse_key"] != pushCollapseKey(collapse) {
 		t.Fatal("FCM collapse key must be short and scoped to this station/turn")
 	}
