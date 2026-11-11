@@ -35,7 +35,7 @@ func (h *Hub) pushBindingLocked(acct string, dev *device) string {
 	}
 	if strings.HasPrefix(acct, "bot:") {
 		group := h.botGroups[strings.TrimPrefix(acct, "bot:")]
-		if !dev.hasSecret || !validPairHash(group.PhoneTokenHash) || !validPairHash(group.PhoneIDHash) {
+		if group.PhonePending || !dev.hasSecret || !validPairHash(group.PhoneTokenHash) || !validPairHash(group.PhoneIDHash) {
 			return ""
 		}
 		// Revoked refers only to the reusable invitation; an already bound

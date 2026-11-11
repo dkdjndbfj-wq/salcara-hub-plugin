@@ -90,7 +90,7 @@ func TestBotPushTwoComputersAndGroupsStaySeparate(t *testing.T) {
 }
 
 func TestBotPushRechecksAuthorizationAfterOAuthWait(t *testing.T) {
-	for _, change := range []string{"phone-revoke", "membership-remove", "phone-rebind", "unregister", "pending-registration", "banned", "disabled", "device-secret", "device-remove"} {
+	for _, change := range []string{"phone-revoke", "phone-revoke-pending", "phone-reset", "phone-reset-pending", "membership-remove", "phone-rebind", "unregister", "pending-registration", "banned", "disabled", "device-secret", "device-remove"} {
 		t.Run(change, func(t *testing.T) {
 			h, google := botPushHub(t)
 			transport := &oauthWaitingPushTransport{base: google, started: make(chan struct{}), release: make(chan struct{})}
@@ -104,20 +104,38 @@ func TestBotPushRechecksAuthorizationAfterOAuthWait(t *testing.T) {
 			postBotPushTurn(t, h, "push-bot-stale", "old-turn")
 			awaitSSESignal(t, transport.started, "Bot push did not reach OAuth wait")
 			switch change {
-			case "phone-revoke", "phone-rebind":
+			case "phone-revoke", "phone-revoke-pending", "phone-rebind":
+				wantStatus := http.StatusOK
+				if change == "phone-revoke-pending" {
+					blockBotRegistrationSave(t, h, botGroupFile)
+					wantStatus = http.StatusServiceUnavailable
+				}
 				w := botRequest(t, h, http.MethodPost, "/v1/bot/phone/revoke", nil, map[string]string{"X-Salcara-Bot-Token": phone})
-				if w.Code != http.StatusOK {
+				if w.Code != wantStatus {
 					t.Fatalf("phone revoke: %d %s", w.Code, w.Body)
 				}
 				if change == "phone-rebind" {
 					oldPhone := phone
+					pack = resetBotPhonePackage(t, h, pack.GroupID)
 					phone = bindBotSourcePhone(t, h, pack)
-					registerBotPush(t, h, "push-bot-stale", phone, fcmToken, notificationScopeA)
+					registerBotPush(t, h, "push-bot-stale", phone, fcmToken, "ns1_"+strings.Repeat("c", 64))
 					late := botRequest(t, h, http.MethodPost, "/v1/app/push/register", map[string]string{"deviceId": "push-bot-stale", "token": ""}, map[string]string{"X-Salcara-Bot-Token": oldPhone})
 					if late.Code != http.StatusForbidden {
 						t.Fatalf("old phone registration still accepted after rebind: %d", late.Code)
 					}
 					postBotPushTurn(t, h, "push-bot-stale", "new-turn")
+				}
+			case "phone-reset", "phone-reset-pending":
+				if change == "phone-reset-pending" {
+					blockBotRegistrationSave(t, h, botGroupFile)
+				}
+				_, err := h.ResetBotPhone(botResetInput(t, h, pack.GroupID))
+				if change == "phone-reset-pending" {
+					if err != ErrBotPhoneUnavailable {
+						t.Fatalf("pending phone reset: %v", err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
 				}
 			case "unregister":
 				registerBotPush(t, h, "push-bot-stale", phone, "", notificationScopeA)
@@ -140,6 +158,10 @@ func TestBotPushRechecksAuthorizationAfterOAuthWait(t *testing.T) {
 				}
 				h.mu.Unlock()
 			}
+			if change == "phone-revoke-pending" || change == "phone-reset-pending" {
+				late := botRequest(t, h, http.MethodPost, "/v1/app/push/register", map[string]string{"deviceId": "push-bot-stale", "token": fcmToken, "platform": "android", "notificationScope": notificationScopeA}, map[string]string{"X-Salcara-Bot-Token": phone})
+				requireBotCode(t, late, http.StatusServiceUnavailable, "bot_phone_revoke_pending")
+			}
 			postBotPushTurn(t, h, "push-bot-sentinel", "sentinel-turn")
 			unblock()
 			want := 1
@@ -155,6 +177,9 @@ func TestBotPushRechecksAuthorizationAfterOAuthWait(t *testing.T) {
 				blob, _ := json.Marshal(data)
 				if strings.Contains(string(blob), "old-turn") || change != "phone-rebind" && data["deviceId"] != "push-bot-sentinel" {
 					t.Fatalf("stale Bot job reached FCM: %v", data)
+				}
+				if data["deviceId"] == "push-bot-stale" && data["notificationScope"] != "ns1_"+strings.Repeat("c", 64) {
+					t.Fatalf("replacement phone borrowed the old notification scope: %v", data)
 				}
 			}
 		})
@@ -222,9 +247,11 @@ func TestBotPushBindingRequiresExactGroupPhoneAndDevice(t *testing.T) {
 	if h.pushBindingLocked(acct, &copy) != "" || h.pushDeviceLocked("bot:unknown-group", dev.info.DeviceID) != nil {
 		t.Fatal("wrong Bot group or non-current device obtained notification authority")
 	}
-	for _, state := range []string{"no-phone-token", "no-phone-id", "no-secret", "wrong-group-id"} {
+	for _, state := range []string{"phone-pending", "no-phone-token", "no-phone-id", "no-secret", "wrong-group-id"} {
 		savedDevice, savedGroup := *dev, *group
 		switch state {
+		case "phone-pending":
+			group.PhonePending = true
 		case "no-phone-token":
 			group.PhoneTokenHash = ""
 		case "no-phone-id":
