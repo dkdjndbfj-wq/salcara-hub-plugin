@@ -173,13 +173,22 @@ func (h *Hub) loadEnrollmentClaims() error {
 
 func (h *Hub) saveEnrollmentClaims() error {
 	h.mu.Lock()
+	state := h.enrollmentClaimsSnapshotLocked()
+	h.mu.Unlock()
+	return h.writeEnrollmentClaimsSnapshot(state)
+}
+
+func (h *Hub) enrollmentClaimsSnapshotLocked() persistedEnrollmentState {
 	state := persistedEnrollmentState{Version: 1, Claims: []persistedEnrollmentClaim{}}
 	for hash, expires := range h.enrollmentClaims {
 		if time.Now().Before(expires) {
 			state.Claims = append(state.Claims, persistedEnrollmentClaim{Hash: hex.EncodeToString(hash[:]), ExpiresAt: expires.UnixMilli(), UserID: h.enrollmentOwners[hash]})
 		}
 	}
-	h.mu.Unlock()
+	return state
+}
+
+func (h *Hub) writeEnrollmentClaimsSnapshot(state persistedEnrollmentState) error {
 	sort.Slice(state.Claims, func(i, j int) bool { return state.Claims[i].Hash < state.Claims[j].Hash })
 	raw, err := json.Marshal(state)
 	if err != nil || len(raw) > maxEnrollmentClaimsFileSize {
@@ -242,37 +251,52 @@ func (h *Hub) CreateDeviceEnrollmentClaimForUser(userID string) (string, time.Ti
 	return value, expires, nil
 }
 
-// consumeEnrollmentClaim makes claim use durable before a new device can be
-// allocated. A crash between claim consumption and registration fails closed.
-func (h *Hub) consumeEnrollmentClaim(hash [32]byte) error {
+// consumeEnrollmentClaim makes claim use durable before assigning its owner or
+// allocating a device. Only a known assignment failure before device creation
+// may restore the claim, under the same locks as consumption and revocation.
+// A crash or a failed compensating write still fails closed.
+func (h *Hub) consumeEnrollmentClaim(hash [32]byte, deviceID string) (string, error) {
 	if h.cfg.DataDir != "" {
 		h.saveMu.Lock()
 		defer h.saveMu.Unlock()
 	}
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	if !h.enrollmentClaimValidLocked(hash) {
 		delete(h.enrollmentClaims, hash)
 		delete(h.enrollmentOwners, hash)
-		h.mu.Unlock()
-		return errors.New("enrollment claim is missing or expired")
+		return "", errors.New("enrollment claim is missing or expired")
+	}
+	if a := h.accounts[deviceAccount(deviceID)]; a != nil && a.devices[deviceID] != nil {
+		return "", errors.New("enrollment target already exists")
 	}
 	expires := h.enrollmentClaims[hash]
 	owner := h.enrollmentOwners[hash]
 	delete(h.enrollmentClaims, hash)
 	delete(h.enrollmentOwners, hash)
-	if h.cfg.DataDir == "" {
-		h.mu.Unlock()
-		return nil
+	if h.cfg.DataDir != "" {
+		if err := h.writeEnrollmentClaimsSnapshot(h.enrollmentClaimsSnapshotLocked()); err != nil {
+			h.enrollmentClaims[hash] = expires
+			h.enrollmentOwners[hash] = owner
+			return "", err
+		}
 	}
-	h.mu.Unlock()
-	if err := h.saveEnrollmentClaims(); err != nil {
-		h.mu.Lock()
+	if err := h.assignEnrolledUserLocked(deviceID, owner); err != nil {
+		// assignEnrolledUserLocked changes memory only after its file write
+		// succeeds. No device exists, and administrators cannot interleave a
+		// revocation or reassignment while mu is held.
 		h.enrollmentClaims[hash] = expires
 		h.enrollmentOwners[hash] = owner
-		h.mu.Unlock()
-		return err
+		if h.cfg.DataDir != "" {
+			if restoreErr := h.writeEnrollmentClaimsSnapshot(h.enrollmentClaimsSnapshotLocked()); restoreErr != nil {
+				delete(h.enrollmentClaims, hash)
+				delete(h.enrollmentOwners, hash)
+				return "", errors.Join(errors.New("enrollment claim restoration failed; a new claim is required"), err, restoreErr)
+			}
+		}
+		return "", err
 	}
-	return nil
+	return owner, nil
 }
 
 func (h *Hub) AdminEnrollmentClaims() any {

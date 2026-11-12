@@ -17,7 +17,7 @@ fail() { printf 'Bot 尚未验收：%s\n' "$*" >&2; exit 1; }
 [[ -d "$install_dir" && ! -L "$install_dir" ]] || fail '安装目录不存在或是符号链接。'
 [[ -f "$install_dir/.env" && ! -L "$install_dir/.env" && -f "$install_dir/compose.release.yml" && ! -L "$install_dir/compose.release.yml" ]] || fail '原部署配置缺失或不安全。'
 grep -Fxq 'SALCARA_HUB_MODE=bot' "$install_dir/.env" || fail '原部署不是 Bot 模式。'
-grep -Fxq 'SALCARA_HUB_IMAGE_VERSION=0.5.5' "$install_dir/.env" || fail 'Bot 镜像版本不匹配；不会启动或迁移数据。'
+grep -Fxq 'SALCARA_HUB_IMAGE_VERSION=0.5.6' "$install_dir/.env" || fail 'Bot 镜像版本不匹配；不会启动或迁移数据。'
 grep -Fxq 'SALCARA_HUB_PROJECT=salcara-hub-bot' "$install_dir/.env" || fail 'Bot Compose 项目标识不匹配。'
 grep -Fxq 'SALCARA_HUB_DATA_VOLUME=salcara-hub-bot_hub-data' "$install_dir/.env" || fail 'Bot 数据卷标识不匹配。'
 build_mode=$(sed -n 's/^SALCARA_HUB_BUILD_MODE=//p' "$install_dir/.env")
@@ -29,7 +29,7 @@ if [[ "$build_mode" == source ]]; then
     [[ "$source_commit" =~ ^[0-9a-f]{40,64}$ ]] || fail '源码提交标识缺失或无效。'
     [[ "$local_image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || fail '本地构建镜像标识缺失或无效。'
 fi
-image='ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.5'
+image='ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.6'
 public_url=$(sed -n 's/^SALCARA_HUB_PUBLIC_URL=//p' "$install_dir/.env")
 [[ "$public_url" =~ ^https://([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?)(:443)?/salcara-hub$ ]] || fail '公开 HTTPS 地址无效。'
 [[ "$(uname -s)" == Linux ]] || fail '续跑仅支持目标 Linux 主机。'
@@ -41,7 +41,7 @@ endpoint=$(docker context inspect "$context" --format '{{.Endpoints.docker.Host}
 [[ "$(docker info --format '{{.OSType}}')" == linux ]] || fail '本机 Docker Engine 不可用或不是 Linux。'
 docker compose version >/dev/null || fail '需要 Docker Compose 插件。'
 
-export SALCARA_HUB_PUBLIC_URL="$public_url" SALCARA_HUB_IMAGE_VERSION=0.5.5 SALCARA_HUB_MODE=bot SALCARA_HUB_DATA_VOLUME=salcara-hub-bot_hub-data SALCARA_HUB_PROJECT=salcara-hub-bot SALCARA_HUB_DISABLE_UPDATES=false
+export SALCARA_HUB_PUBLIC_URL="$public_url" SALCARA_HUB_IMAGE_VERSION=0.5.6 SALCARA_HUB_MODE=bot SALCARA_HUB_DATA_VOLUME=salcara-hub-bot_hub-data SALCARA_HUB_PROJECT=salcara-hub-bot SALCARA_HUB_DISABLE_UPDATES=false
 compose() { docker compose --project-name salcara-hub-bot --project-directory "$install_dir" --env-file "$install_dir/.env" -f "$install_dir/compose.release.yml" "$@"; }
 compose config --quiet || fail 'Compose 配置验证失败。'
 docker volume inspect salcara-hub-bot_hub-data >/dev/null 2>&1 || fail '原 Bot 数据卷不存在；拒绝初始化新卷或伪装成恢复成功。'
@@ -56,7 +56,7 @@ if [[ "$build_mode" == source ]]; then
     fi
     [[ "$image_id" == "$local_image_id" ]] || fail '本地 Bot 镜像与已记录构建标识不匹配。'
     built_version=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image") || fail '无法读取本地 Bot 镜像版本标签。'
-    [[ "$built_version" == 0.5.5 ]] || fail '本地 Bot 镜像版本标签不匹配。'
+    [[ "$built_version" == 0.5.6 ]] || fail '本地 Bot 镜像版本标签不匹配。'
 else
     compose pull hub || fail '正式 Bot 镜像不可用；原数据卷和部署配置均已保留。'
 fi

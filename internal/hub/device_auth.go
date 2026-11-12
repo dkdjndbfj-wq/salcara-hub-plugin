@@ -161,18 +161,18 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 			writeCodedError(w, status, deviceRegistrationFailureCode(status), "本站设备容量已满或设备身份不可用")
 			return
 		}
-		userID := h.enrollmentOwners[claimHash]
 		h.enrollLimiter.fail(ip)
 		h.mu.Unlock()
-		if err := h.consumeEnrollmentClaim(claimHash); err != nil {
+		userID, err := h.consumeEnrollmentClaim(claimHash, info.DeviceID)
+		if err != nil {
 			h.log.Error("device enrollment claim persistence failed", "err", err)
-			writeError(w, http.StatusServiceUnavailable, "登记码无法安全提交，请稍后重试")
+			writeCodedError(w, http.StatusServiceUnavailable, "remote_unavailable", "设备登记无法安全提交，请稍后重试；若登记码已失效，请联系管理员重新获取")
 			return
 		}
 		h.mu.Lock()
 		if err := h.assignEnrolledUserLocked(info.DeviceID, userID); err != nil {
 			h.mu.Unlock()
-			writeError(w, 503, "用户归属无法保存或用户已停用，请联系管理员")
+			writeCodedError(w, http.StatusServiceUnavailable, "remote_unavailable", "用户归属无法保存或用户已停用，请联系管理员")
 			return
 		}
 	}
@@ -187,7 +187,7 @@ func (h *Hub) handleDeviceRegister(w http.ResponseWriter, r *http.Request, _ str
 	if h.cfg.DataDir != "" {
 		if err := h.confirmDeviceRegistration(accountID, info.DeviceID); err != nil {
 			h.log.Error("new device registration persistence failed", "err", err)
-			writeError(w, http.StatusServiceUnavailable, "设备登记尚未安全保存，请稍后重试")
+			writeCodedError(w, http.StatusServiceUnavailable, "remote_unavailable", "设备登记尚未安全保存，请稍后重试")
 			return
 		}
 	}

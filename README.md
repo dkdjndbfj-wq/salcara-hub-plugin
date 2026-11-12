@@ -35,7 +35,7 @@ Hub 不运行大模型，也不要求用户提交中转站账号或模型 API Ke
 - 0.5.3 新增运维中心：分角色协作、可查询导出的操作审计、健康与监控接口、离线加密备份和校验恢复，见 [运维与恢复](docs/OPERATIONS-AND-RECOVERY.zh.md)。
 - 0.5.3 支持全站分别开关本站 API、外站 API、反代账号和官方账号，按完整来源地址限制远程执行，见 [远程使用授权](docs/REMOTE-SOURCE-AUTHORIZATION.zh.md)。
 - 0.5.3 支持管理员账号登录、用户档案、按用户登记和关联电脑、禁用用户及单独来源授权，见 [用户与设备管理](docs/USER-MANAGEMENT.zh.md)。手机保持原扫码流程。
-- 0.5.5 完善可信 API 自动登记、原 Hub 身份恢复、Bot 手机绑定与重置，以及持久通知；配套 Android 1.8.5 / Desktop（Bridge）1.6.8，见 [版本说明](docs/RELEASE-0.5.5.md)。
+- 0.5.6 发布准备：保留任务原状态与回执，支持撤回尚未派发的待发任务，修复队列恢复和 Bot 设备清理，并显示安全记录容量；配套 Android 1.8.6（versionCode 27）/ Desktop（Bridge）1.6.9，见 [版本说明与待验收项](docs/RELEASE-0.5.6.md)。
 
 远程会话、消息和 Agent 操作需要电脑在线，并以桌面端已安装、已授权的能力为准；仅部署 Hub 不会自动开放 Agent 未提供的原生桌面接口。
 
@@ -43,10 +43,10 @@ Hub 不运行大模型，也不要求用户提交中转站账号或模型 API Ke
 
 准备一台 Linux 主机、Docker Engine / Compose、自己控制的域名和 HTTPS 反向代理。支持的镜像平台为 `linux/amd64` 和 `linux/arm64`。
 
-以下安装示例以 0.5.5 为目标。执行前在 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 确认 `standalone-v0.5.5` 已正式发布且同版本镜像可拉取；源码或文档更新不代表发布完成。在本地审阅该版本脚本后执行：
+以下安装示例以 0.5.6 为目标。执行前在 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 确认 `standalone-v0.5.6` 已正式发布且同版本镜像可拉取；源码或文档更新不代表发布完成。在本地审阅该版本脚本后执行：
 
 ```sh
-git clone --branch standalone-v0.5.5 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
+git clone --branch standalone-v0.5.6 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
 cd salcara-hub
 bash deploy/standalone/install.sh \
   --public-url https://relay.example.com/salcara-hub \

@@ -25,7 +25,7 @@ RUN mkdir -p /runtime/data && chmod 0700 /runtime/data && chown 65532:65532 /run
 FROM verify AS build
 ARG TARGETOS
 ARG TARGETARCH
-ARG VERSION=0.5.5-dev
+ARG VERSION=0.5.6-dev
 RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -buildid= -X salcara/hub/internal/standalone.Version=$VERSION" -o /out/salcara-hub ./cmd/hub
 RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -buildid= -X salcara/hub/internal/standalone.Version=$VERSION" -o /out/salcara-hub-launcher ./cmd/hub-launcher
 
@@ -35,7 +35,7 @@ COPY --from=build /out/salcara-hub-launcher /salcara-hub-launcher
 COPY --from=build /out/artifacts /artifacts
 
 FROM scratch AS runtime
-ARG VERSION=0.5.5-dev
+ARG VERSION=0.5.6-dev
 LABEL org.opencontainers.image.title="Salcara Hub standalone" \
       org.opencontainers.image.description="Independent device pairing and remote message relay; no model API key required" \
       org.opencontainers.image.source="https://github.com/dkdjndbfj-wq/salcara-hub-plugin" \

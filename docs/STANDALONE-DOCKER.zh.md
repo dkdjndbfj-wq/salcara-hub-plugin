@@ -1,6 +1,6 @@
-# 独立 Docker 部署（0.5.5 发布目标）
+# 独立 Docker 部署（0.5.6 发布目标）
 
-> 本文脚本安装目标为 **0.5.5**，Station 和 Bot 使用同版本镜像；本次配套 Android 1.8.5 / Desktop（Bridge）1.6.8，最低准入版本策略不变。所有安装、升级命令须在对应正式 Release、公开镜像及下载校验确认后执行；文档或下一版源码修改本身不是发布凭证。0.5.3 引入的管理员账号、用户档案、按用户登记电脑和单独授权见 [用户与设备管理](USER-MANAGEMENT.zh.md)。0.5.5 的新增能力及待验收范围见 [版本说明](RELEASE-0.5.5.md)。
+> 本文脚本安装目标为 **0.5.6**，Station 和 Bot 使用同版本镜像；本次配套 Android 1.8.6（versionCode 27）/ Desktop（Bridge）1.6.9，发布签名身份与最低准入版本策略不变。所有安装、升级命令须在对应正式 Release、公开镜像及下载校验确认后执行；文档或下一版源码修改本身不是发布凭证。0.5.3 引入的管理员账号、用户档案、按用户登记电脑和单独授权见 [用户与设备管理](USER-MANAGEMENT.zh.md)。0.5.6 的任务恢复、待发撤回、Bot 清理修复及待验收范围见 [版本说明](RELEASE-0.5.6.md)。
 
 Hub 独立运行，不修改 Sub2API、不共用它的数据库，也不读取模型 API Key。普通用户电脑与手机扫码配对即可使用，不需要管理员审批；管理员可在后台封禁设备。Docker 只负责消息转发，不能替电脑端绕过 Codex / Claude Desktop 的宿主能力限制。
 
@@ -19,14 +19,14 @@ Hub 独立运行，不修改 Sub2API、不共用它的数据库，也不读取�
 | 已有 0.5.x 管理密钥版 | [0.5.x 修复更新](#05x-修复更新)，不再初始化 |
 | 交给 Agent 部署 | [Agent 部署指南](AGENT-DEPLOY.zh.md) |
 
-默认安装会校验已经公开的正式 Release 和镜像。Station / Bot 均以 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 中的 `standalone-v0.5.5` 为目标，不使用未知 `latest` 或未签名开发产物。若对应正式资产尚未公开或不可用，安装器停止；Bot 可显式选择干净提交源码构建，见下文。两种模式仍使用独立项目和数据卷。
+默认安装会校验已经公开的正式 Release 和镜像。Station / Bot 均以 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 中的 `standalone-v0.5.6` 为目标，不使用未知 `latest` 或未签名开发产物。若对应正式资产尚未公开或不可用，安装器停止；Bot 可显式选择干净提交源码构建，见下文。两种模式仍使用独立项目和数据卷。
 
 ## 2. 首次安装
 
-先确认 0.5.5 的正式标签、Release 和镜像已公开可用，再将示例域名换成自己的域名。以下是本地审阅脚本后执行，不是远程 `curl | sh`。
+先确认 0.5.6 的正式标签、Release 和镜像已公开可用，再将示例域名换成自己的域名。以下是本地审阅脚本后执行，不是远程 `curl | sh`。
 
 ```sh
-git clone --branch standalone-v0.5.5 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
+git clone --branch standalone-v0.5.6 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
 cd salcara-hub
 less deploy/standalone/install.sh
 bash deploy/standalone/install.sh \
@@ -36,7 +36,7 @@ bash deploy/standalone/install.sh \
 
 也可以直接 `bash deploy/standalone/install.sh`，按提示填写 URL 和新安装目录。当前用户必须能访问本机 Docker、写入安装目录的父目录；权限不足时自行选择合适目录或经过授权提权。脚本拒绝已有目录、Hub 容器/数据卷、远程 Docker context 和冲突端口，不覆盖配置、不删除卷、不重复初始化。
 
-脚本的 Station / Bot 版本均固定为 `0.5.5`。它先确认正式 Release 和同版本镜像，再初始化管理密钥，启动并检查对应版本健康。初始管理密钥不会打印、写日志或放进命令参数，只保存到受限文件。任一模式的 Release 或镜像不可用时，默认安装会在创建部署目录和数据卷前停止，不会改用旧版本。失败会保留现场，不显示假完成提示，不自动清理或重试 `-init`。不要同时运行多个安装脚本。
+脚本的 Station / Bot 版本均固定为 `0.5.6`。它先确认正式 Release 和同版本镜像，再初始化管理密钥，启动并检查对应版本健康。初始管理密钥不会打印、写日志或放进命令参数，只保存到受限文件。任一模式的 Release 或镜像不可用时，默认安装会在创建部署目录和数据卷前停止，不会改用旧版本。失败会保留现场，不显示假完成提示，不自动清理或重试 `-init`。不要同时运行多个安装脚本。
 
 安装结束会给出管理 URL、两种 iframe URL、初始管理密钥文件位置和待配置的反代片段。**容器就绪还不代表公网可用，下一步反代配置不能省略。**
 
@@ -126,7 +126,7 @@ Compose/env、反代和 TLS 等数据目录外配置另行备份。手机和电�
 
 ```dotenv
 SALCARA_HUB_PUBLIC_URL=https://relay.example.com/salcara-hub
-SALCARA_HUB_IMAGE_VERSION=0.5.5
+SALCARA_HUB_IMAGE_VERSION=0.5.6
 SALCARA_HUB_DISABLE_UPDATES=false
 # Bot 沿用同一镜像版本，并设置：
 # SALCARA_HUB_MODE=bot、SALCARA_HUB_PROJECT=salcara-hub-bot、
@@ -204,7 +204,7 @@ curl --fail https://relay.example.com/salcara-hub/
 docker stats --no-stream
 ```
 
-检查本地健康中的产品为 `salcara-hub-standalone`、版本为 `0.5.5`；确认公网管理页能登录、更改账号和密码、退出，未登录管理 API 返回 401，普通说明页正常，同源 iframe 可打开，原 Sub2API 页面和只读健康接口不变。核对首页、状态页均显示配套 Android 1.8.5 / Bridge 1.6.8，并在亮色、暗色和手机宽度下检查布局。不要发送付费模型请求当作部署健康检查，不把管理密钥打印在测试报告中。
+检查本地健康中的产品为 `salcara-hub-standalone`、版本为 `0.5.6`；确认公网管理页能登录、更改账号和密码、退出，未登录管理 API 返回 401，普通说明页正常，同源 iframe 可打开，原 Sub2API 页面和只读健康接口不变。核对首页、状态页均显示配套 Android 1.8.6 / Bridge 1.6.9，并在亮色、暗色和手机宽度下检查布局。不要发送付费模型请求当作部署健康检查，不把管理密钥打印在测试报告中。
 
 若是 Agent 部署，只提供成功核实的项目、容器、镜像/版本、反代变更与 URL；没有实测手机扫码/桌面续聊就明确“待设备端验收”。服务器自检通过不能保证电脑端所有宿主能力已可用。
 
@@ -226,7 +226,7 @@ docker stats --no-stream
 
 ## 0.5.x 修复更新
 
-已有 0.5.x 部署升级到 0.5.5 时不重新初始化。0.5.3 引入管理员账号：从 0.5.0–0.5.2 首次升级时以 `admin` 和原管理密钥登录；已经设置自定义账号和密码的安装继续使用原账号和密码。先备份原项目配置和完整持久卷，在管理页检查更新可升级 Hub 子程序；首次获得 0.5.3 引入的后台自动检查仍须升级包含新版 launcher 的完整镜像。确认 0.5.5 正式 Release 和镜像已公开可用后，在原项目的 `.env` 中将 `SALCARA_HUB_IMAGE_VERSION` 改成 `0.5.5`，保留原项目名、卷名、网络及 URL，然后逐条运行：
+已有 0.5.x 部署升级到 0.5.6 时不重新初始化。0.5.3 引入管理员账号：从 0.5.0–0.5.2 首次升级时以 `admin` 和原管理密钥登录；已经设置自定义账号和密码的安装继续使用原账号和密码。先备份原项目配置和完整持久卷，在管理页检查更新可升级 Hub 子程序；首次获得 0.5.3 引入的后台自动检查仍须升级包含新版 launcher 的完整镜像。确认 0.5.6 正式 Release 和镜像已公开可用后，在原项目的 `.env` 中将 `SALCARA_HUB_IMAGE_VERSION` 改成 `0.5.6`，保留原项目名、卷名、网络及 URL，然后逐条运行：
 
 ```sh
 docker compose -f compose.release.yml config --quiet
@@ -240,7 +240,7 @@ curl --fail http://127.0.0.1:8787/healthz
 
 ## 旧版迁移
 
-0.4.0 的认证变更必须通过 **0.5.x 完整镜像升级**（本文目标为 0.5.5 发布目标，执行前确认正式 Release 和镜像已公开可用）。不要在 0.4.0 管理页点击应用更新来迁移，不要为升级创建另一套项目或空卷，也不要重跑首次安装脚本。
+0.4.0 的认证变更必须通过 **0.5.x 完整镜像升级**（本文目标为 0.5.6 发布目标，执行前确认正式 Release 和镜像已公开可用）。不要在 0.4.0 管理页点击应用更新来迁移，不要为升级创建另一套项目或空卷，也不要重跑首次安装脚本。
 
 1. 找到原 Hub 的准确 Compose 项目目录、文件、项目名及数据卷。若曾使用 `-p` 自定义项目名，下面所有命令沿用原项目名；不要按示例名称猜测。
 2. 记录旧容器镜像 ID/digest、运行 Hub 版本，确认目标 Release/镜像正式可用。备份原 Compose、`.env` 和反代配置。停止的只能是这个 Hub，不停止 Sub2API、数据库、Redis 或 Docker daemon。
@@ -251,16 +251,16 @@ curl --fail http://127.0.0.1:8787/healthz
 ```sh
 # 备份目录必须全新且只供当前管理员访问；示例名字请换成自己的。
 umask 077
-mkdir -m 700 ../hub-backup-before-0.5.5
-cp compose.release.yml .env ../hub-backup-before-0.5.5/
+mkdir -m 700 ../hub-backup-before-0.5.6
+cp compose.release.yml .env ../hub-backup-before-0.5.6/
 docker compose -f compose.release.yml stop hub
-docker compose -f compose.release.yml cp hub:/data ../hub-backup-before-0.5.5/data
-chmod -R go-rwx ../hub-backup-before-0.5.5
+docker compose -f compose.release.yml cp hub:/data ../hub-backup-before-0.5.6/data
+chmod -R go-rwx ../hub-backup-before-0.5.6
 ```
 
 备份失败时停止升级，在原配置未改变的前提下 `docker compose -f compose.release.yml start hub` 恢复旧 Hub。不要删卷或猜测性继续。
 
-4. 用自己的编辑器将正式 Compose 更新成已发布的 0.5.5 配置，保留原项目名、卷名和网络，`.env` 中设 `SALCARA_HUB_IMAGE_VERSION=0.5.5`。新的配置不再使用 `SALCARA_HUB_ADMIN_TOKEN_FILE`。下面在**已完成完整备份且旧 Hub 已停止**后运行：
+4. 用自己的编辑器将正式 Compose 更新成已发布的 0.5.6 配置，保留原项目名、卷名和网络，`.env` 中设 `SALCARA_HUB_IMAGE_VERSION=0.5.6`。新的配置不再使用 `SALCARA_HUB_ADMIN_TOKEN_FILE`。下面在**已完成完整备份且旧 Hub 已停止**后运行：
 
 ```sh
 docker compose -f compose.release.yml config --quiet
@@ -322,11 +322,13 @@ chmod 600 ./secrets/admin-initial-login.txt
 
 发布 GitHub Release、镜像或签名更新清单不会自动重启已有服务器。公开首页与状态页的配套版本嵌入 Hub 构建；只更新手机或 Bridge、或只发布源码，都不会改变线上页面。部署者须在准确目标完成升级后，另行检查 `/healthz`、首页和 `/salcara-hub/status` 的实际版本。本版不调整最低准入版本或启用强制更新。
 
-已有安装**首次启用后台自动检测，需要换用包含新启动器的已发布镜像**；单独在旧版网页更新 Hub 子程序不能升级启动器。历史 `0.5.2` 镜像没有这项后台检测能力，`0.5.3` 引入该能力；本文目标 `0.5.5` 仍须确认正式 Release 和镜像公开可用后才能安装。底层镜像/启动器仍按 Release 说明在原项目目录完整备份、拉固定镜像并 `up -d --no-deps hub`，不使用未知 `latest`，不执行 `down -v`。
+已有安装**首次启用后台自动检测，需要换用包含新启动器的已发布镜像**；单独在旧版网页更新 Hub 子程序不能升级启动器。历史 `0.5.2` 镜像没有这项后台检测能力，`0.5.3` 引入该能力；本文目标 `0.5.6` 仍须确认正式 Release 和镜像公开可用后才能安装。底层镜像/启动器仍按 Release 说明在原项目目录完整备份、拉固定镜像并 `up -d --no-deps hub`，不使用未知 `latest`，不执行 `down -v`。
 
 这是**一个 Hub 容器**，内有小型 Go 启动器与 Hub，共享容器资源限制；没有另一套 Sub2API、Redis、数据库、Node 或 Docker 更新器，不挂 Docker socket。默认内存硬限制 384 MiB、CPU 配额 1 核、进程上限 64。后台“省资源 / 均衡 / 高负载”对应 Hub Go 软目标 96 / 192 / 320 MiB，不改变 Docker 硬限制，也不是实测占用或用户数量承诺。
 
 手机按需收发；电脑为接收 NAT 后任务仍有轻量连接。旧版进度主要在内存中有限暂存；0.5.3 源码已实现加密持久消息、结果及图片分片，默认未确认内容保留 7 天，可在系统页调整为 1–30 天。电脑离线时暂存新消息默认关闭，开启后最长等待 10 分钟；执行结果未知的任务不自动重复执行。详情见 [消息存储实现](DURABLE-REMOTE-MAILBOX-IMPLEMENTATION-20261107.zh.md)。这仍是有配额与保留期限的暂存，不是永久云端聊天备份。HTTPS 保护传输，当前不是端到端加密，站点运营者能读取转发内容。
+
+0.5.6 为尚未派发的待发任务增加持久撤回，必须由 Hub 确认后才算成功；停止等待或断开手机连接不等于停止 Agent。正文到期不抹去“结果未知”“结果截断”或“已撤回”的事实。到期、损坏且确认未派发的队列记录会安全结束并释放正文；管理页另显示防重复执行记录的数量与上限。清理正文不会删除这些安全身份，容量满时需维护人员处理，不能靠清空数据或自动换任务编号重试。
 
 0.5.3 源码新增的独立运维密钥、审计导出、监控告警接口和离线加密备份工具见 [协作管理与恢复](OPERATIONS-AND-RECOVERY.zh.md)。备份包含完整 Hub 数据目录；反代、FCM、Compose/env 和独立 Edge 数据需要另外备份。恢复只能写入新目录，先演练验证再切换生产卷。
 
