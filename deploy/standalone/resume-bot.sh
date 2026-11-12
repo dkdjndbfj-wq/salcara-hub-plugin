@@ -80,7 +80,7 @@ healthy=false
 for attempt in {1..30}; do
     if health=$(curl --disable --fail --silent --show-error --max-time 2 'http://127.0.0.1:8787/healthz' 2>/dev/null) &&
         printf '%s\n' "$health" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"salcara-hub-standalone"' &&
-        printf '%s\n' "$health" | grep -Eq '"version"[[:space:]]*:[[:space:]]*"0\.5\.5"' &&
+        printf '%s\n' "$health" | grep -Eq '"version"[[:space:]]*:[[:space:]]*"0\.5\.6"' &&
         printf '%s\n' "$health" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
         healthy=true; break
     fi
