@@ -199,6 +199,21 @@ func (h *Hub) saveNowError() error {
 // Caller holds saveMu. Storage I/O never holds mu; a newer concurrent revoke
 // remains pending even when this earlier snapshot commits successfully.
 func (h *Hub) saveSnapshotError(snapshot persistedState) error {
+	err := h.writeDeviceSnapshot(snapshot)
+	if err == nil {
+		h.mu.Lock()
+		h.savedPairRevocationEpoch = max(h.savedPairRevocationEpoch, snapshot.pairRevocationEpoch)
+		h.mu.Unlock()
+	}
+	return err
+}
+
+// Pure disk write: callers serialize with saveMu. Cleanup additionally holds
+// mu so a selected offline device cannot reconnect or be banned during commit.
+func (h *Hub) writeDeviceSnapshot(snapshot persistedState) error {
+	if h.cfg.DataDir == "" {
+		return nil
+	}
 	// Compact serialization avoids indentation amplifying nested raw metadata.
 	b, err := json.Marshal(snapshot)
 	if err == nil && len(b) > maxDevicesFileBytes {
@@ -206,11 +221,6 @@ func (h *Hub) saveSnapshotError(snapshot persistedState) error {
 	}
 	if err == nil {
 		err = writeFileAtomic(filepath.Join(h.cfg.DataDir, devicesFile), b, 0o600)
-	}
-	if err == nil {
-		h.mu.Lock()
-		h.savedPairRevocationEpoch = max(h.savedPairRevocationEpoch, snapshot.pairRevocationEpoch)
-		h.mu.Unlock()
 	}
 	return err
 }

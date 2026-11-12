@@ -23,10 +23,11 @@ const (
 
 // DeviceCleanup is the active cleanup policy, in whole days (0 = off).
 type DeviceCleanup struct {
-	UnpairedDays int   `json:"unpaired_days"`
-	PairedDays   int   `json:"paired_days"`
-	LastRunAt    int64 `json:"last_run_at"`  // epoch ms of the last sweep, 0 if none yet
-	LastRemoved  int   `json:"last_removed"` // computers removed by the last sweep
+	UnpairedDays int    `json:"unpaired_days"`
+	PairedDays   int    `json:"paired_days"`
+	LastRunAt    int64  `json:"last_run_at"`  // epoch ms of the last sweep, 0 if none yet
+	LastRemoved  int    `json:"last_removed"` // computers removed by the last sweep
+	LastError    string `json:"last_error,omitempty"`
 }
 
 func validCleanupDays(days int) bool { return days >= 0 && days <= MaxDeviceCleanupDays }
@@ -53,6 +54,10 @@ func (h *Hub) ApplyDeviceCleanup(unpairedDays, pairedDays int, before func() err
 	h.activeRequests.Add(1)
 	h.lifecycleMu.Unlock()
 	defer h.activeRequests.Done()
+	h.enrollmentMu.Lock()
+	defer h.enrollmentMu.Unlock()
+	h.saveMu.Lock()
+	defer h.saveMu.Unlock()
 	h.mu.Lock()
 	if before != nil {
 		if err := before(); err != nil {
@@ -62,21 +67,32 @@ func (h *Hub) ApplyDeviceCleanup(unpairedDays, pairedDays int, before func() err
 	}
 	h.cleanup.UnpairedDays, h.cleanup.PairedDays = unpairedDays, pairedDays
 	h.auditLocked(AdminAudit{At: nowMs(), Action: "device-cleanup", Reason: cleanupReason(unpairedDays, pairedDays), Actor: "standalone-admin"})
-	removed := h.sweepInactiveDevicesLocked(time.Now())
-	h.mu.Unlock()
-	h.markDirty()
-	return removed, nil
+	return h.sweepInactiveDevicesLocked(time.Now())
 }
 
 // RunDeviceCleanup sweeps now with the current policy.
 func (h *Hub) RunDeviceCleanup() int {
-	h.mu.Lock()
-	removed := h.sweepInactiveDevicesLocked(time.Now())
-	h.mu.Unlock()
-	if removed > 0 {
-		h.markDirty()
-	}
+	removed, _ := h.RunDeviceCleanupError()
 	return removed
+}
+
+// RunDeviceCleanupError also reports partial persistence; callers must not
+// claim success when membership repair is still pending.
+func (h *Hub) RunDeviceCleanupError() (int, error) {
+	h.lifecycleMu.Lock()
+	if h.stopped {
+		h.lifecycleMu.Unlock()
+		return 0, errors.New("Hub is stopping")
+	}
+	h.activeRequests.Add(1)
+	h.lifecycleMu.Unlock()
+	defer h.activeRequests.Done()
+	h.enrollmentMu.Lock()
+	defer h.enrollmentMu.Unlock()
+	h.saveMu.Lock()
+	defer h.saveMu.Unlock()
+	h.mu.Lock()
+	return h.sweepInactiveDevicesLocked(time.Now())
 }
 
 func cleanupReason(unpaired, paired int) string {
@@ -103,21 +119,24 @@ func itoa(n int) string {
 	return string(b[i:])
 }
 
-// sweepInactiveDevicesLocked removes computers that match the policy and
-// releases their metadata budget, cached events and phone streams. Caller holds h.mu.
-func (h *Hub) sweepInactiveDevicesLocked(now time.Time) int {
+// Caller holds enrollmentMu, saveMu and mu. This method releases mu. Commit
+// device removal first, then publish it in memory and persist group membership.
+// Startup prunes orphan memberships if the second write fails or we crash.
+func (h *Hub) sweepInactiveDevicesLocked(now time.Time) (int, error) {
 	h.cleanup.LastRunAt = now.UnixMilli()
+	h.cleanup.LastError = ""
+	h.cleanup.LastRemoved = 0
 	unpaired, paired := h.cleanup.UnpairedDays, h.cleanup.PairedDays
-	if unpaired == 0 && paired == 0 {
-		h.cleanup.LastRemoved = 0
-		return 0
-	}
 	nowMillis := now.UnixMilli()
-	removed := 0
+	candidates := map[string]map[string]bool{}
 	for accountID, a := range h.accounts {
 		for deviceID, dev := range a.devices {
-			if dev.conn != nil || dev.banned {
+			if dev.conn != nil || dev.banned || h.deviceRegistrationPendingLocked(dev) {
 				continue // online computers and ban records are never cleaned
+			}
+			botPaired, pending := h.cleanupBotIdentityLocked(accountID, deviceID)
+			if pending {
+				continue
 			}
 			if dev.lastSeen <= 0 {
 				// Old state without a timestamp: start counting from now.
@@ -125,28 +144,108 @@ func (h *Hub) sweepInactiveDevicesLocked(now time.Time) int {
 				continue
 			}
 			days := unpaired
-			if dev.hasPair {
+			if dev.hasPair || botPaired {
 				days = paired
 			}
 			if days == 0 || nowMillis-dev.lastSeen < int64(days)*24*int64(time.Hour/time.Millisecond) {
 				continue
 			}
-			h.removeDeviceLocked(accountID, a, deviceID, dev)
-			removed++
+			if candidates[accountID] == nil {
+				candidates[accountID] = map[string]bool{}
+			}
+			candidates[accountID][deviceID] = true
 		}
-		if len(a.devices) == 0 && len(a.apps) == 0 {
-			h.removeAccountLocked(accountID, a)
+	}
+	removed := 0
+	if len(candidates) > 0 {
+		snapshot := h.snapshotLocked()
+		for accountID, ids := range candidates {
+			kept := snapshot.Accounts[accountID][:0]
+			for _, d := range snapshot.Accounts[accountID] {
+				if !ids[d.Device.DeviceID] {
+					kept = append(kept, d)
+				}
+			}
+			if len(kept) == 0 {
+				delete(snapshot.Accounts, accountID)
+			} else {
+				snapshot.Accounts[accountID] = kept
+			}
 		}
+		if err := h.writeDeviceSnapshot(snapshot); err != nil {
+			h.cleanup.LastError = "设备清理尚未保存，请检查数据目录空间和写入权限后重试。"
+			h.mu.Unlock()
+			h.log.Error("device cleanup commit failed", "err", err)
+			return 0, err
+		}
+		for accountID, ids := range candidates {
+			a := h.accounts[accountID]
+			for id := range ids {
+				h.removeDeviceLocked(accountID, a, id, a.devices[id])
+				if h.cfg.DeploymentMode == "bot" && accountID == deviceAccount(id) {
+					for _, g := range h.botGroups {
+						delete(g.Computers, id)
+					}
+					h.cleanupBotPending = true
+				}
+				removed++
+			}
+			if len(a.devices) == 0 && len(a.apps) == 0 {
+				h.removeAccountLocked(accountID, a)
+			}
+		}
+		// The committed snapshot already excludes every newly revoked pair.
+		h.savedPairRevocationEpoch = h.pairRevocationEpoch
 	}
 	h.cleanup.LastRemoved = removed
 	if removed > 0 {
 		h.auditLocked(AdminAudit{At: nowMillis, Action: "device-cleanup-run", Reason: "自动清理 " + itoa(removed) + " 台不活跃电脑", Actor: "hub"})
 		h.log.Info("inactive computers removed", "count", removed)
 	}
-	return removed
+	botSnapshot := h.botSnapshotLocked()
+	h.mu.Unlock()
+	if h.cleanupBotPending {
+		if err := h.writeBotSnapshot(botSnapshot); err != nil {
+			h.mu.Lock()
+			h.cleanup.LastError = "电脑已清理，绑定组记录尚未同步；请检查数据目录空间和写入权限，再执行一次清理。"
+			h.mu.Unlock()
+			h.log.Error("device cleanup membership commit failed", "err", err)
+			return removed, err
+		}
+		h.cleanupBotPending = false
+	}
+	h.markDirty()
+	return removed, nil
+}
+
+func (h *Hub) cleanupBotIdentityLocked(accountID, id string) (paired, pending bool) {
+	if h.cfg.DeploymentMode != "bot" || accountID != deviceAccount(id) {
+		return
+	}
+	for _, g := range h.botGroups {
+		if g.Computers[id] {
+			paired = paired || g.PhoneTokenHash != "" || g.PhonePending
+			pending = pending || g.PhonePending || g.phoneIntent != nil
+		}
+	}
+	return
+}
+
+func (h *Hub) pruneBotComputersLocked() {
+	for _, g := range h.botGroups {
+		for id := range g.Computers {
+			a := h.accounts[deviceAccount(id)]
+			if a == nil || a.devices[id] == nil {
+				delete(g.Computers, id)
+			}
+		}
+	}
 }
 
 func (h *Hub) removeDeviceLocked(accountID string, a *account, deviceID string, dev *device) {
+	if h.cfg.DeploymentMode == "bot" && accountID == deviceAccount(deviceID) {
+		h.notifyBotScopeChangedLocked(&botGroup{Computers: map[string]bool{deviceID: true}})
+	}
 	if dev.hasPair {
 		h.setPairLocked(accountID, dev, [32]byte{}, false)
 	}

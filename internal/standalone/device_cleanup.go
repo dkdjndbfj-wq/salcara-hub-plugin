@@ -132,7 +132,15 @@ func (s *Server) serveDeviceCleanup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.RunNow && in.UnpairedDays == nil && in.PairedDays == nil {
-		removed := s.hub.RunDeviceCleanup()
+		removed, err := s.hub.RunDeviceCleanupError()
+		if err != nil {
+			message := s.hub.CurrentDeviceCleanup().LastError
+			if message == "" {
+				message = "清理暂不可用，请在服务恢复后刷新状态再试"
+			}
+			respond(w, http.StatusServiceUnavailable, map[string]any{"error": message, "device_cleanup": s.hub.CurrentDeviceCleanup(), "removed": removed})
+			return
+		}
 		respond(w, http.StatusOK, map[string]any{"device_cleanup": s.hub.CurrentDeviceCleanup(), "removed": removed})
 		return
 	}
@@ -146,9 +154,19 @@ func (s *Server) serveDeviceCleanup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var warning bool
-	removed, err := s.hub.ApplyDeviceCleanup(next.UnpairedDays, next.PairedDays, func() error { var err error; warning, err = saveDeviceCleanup(s.cfg.DataDir, next); return err })
+	settingsSaved := false
+	removed, err := s.hub.ApplyDeviceCleanup(next.UnpairedDays, next.PairedDays, func() error {
+		var err error
+		warning, err = saveDeviceCleanup(s.cfg.DataDir, next)
+		settingsSaved = err == nil
+		return err
+	})
 	if err != nil {
-		failure(w, http.StatusInternalServerError, "清理设置未保存，请检查数据卷是否可写且配置文件不是链接")
+		message := "清理设置未保存，请检查数据目录空间和写入权限后重试"
+		if settingsSaved {
+			message = "清理设置已保存，但本次清理未完成。" + s.hub.CurrentDeviceCleanup().LastError
+		}
+		respond(w, http.StatusServiceUnavailable, map[string]any{"error": message, "device_cleanup": s.hub.CurrentDeviceCleanup(), "removed": removed})
 		return
 	}
 	respond(w, http.StatusOK, map[string]any{"device_cleanup": s.hub.CurrentDeviceCleanup(), "removed": removed, "durability_warning": warning})

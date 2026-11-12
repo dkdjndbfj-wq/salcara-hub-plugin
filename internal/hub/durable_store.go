@@ -33,22 +33,25 @@ type StoragePolicy struct {
 }
 
 type StorageStatus struct {
-	Enabled           bool          `json:"enabled"`
-	Policy            StoragePolicy `json:"policy"`
-	DiskBytes         int64         `json:"diskBytes"`
-	PayloadBytes      int64         `json:"payloadBytes"`
-	ImageBytes        int64         `json:"imageBytes"`
-	ThumbnailBytes    int64         `json:"thumbnailBytes"`
-	ReplyBytes        int64         `json:"replyBytes"`
-	QueueBytes        int64         `json:"queueBytes"`
-	EventCount        int64         `json:"eventCount"`
-	OperationCount    int64         `json:"operationCount"`
-	BlobCount         int64         `json:"blobCount"`
-	LastCleanupAt     int64         `json:"lastCleanupAt"`
-	Warning           bool          `json:"warning"`
-	FreeDiskBytes     int64         `json:"freeDiskBytes"`
-	ReservedDiskBytes int64         `json:"reservedDiskBytes"`
-	LowDisk           bool          `json:"lowDisk"`
+	RecordCapacity    []StorageRecordCapacity `json:"recordCapacity,omitempty"`
+	CapacityKnown     bool                    `json:"capacityKnown"`
+	CapacityMessage   string                  `json:"capacityMessage,omitempty"`
+	Enabled           bool                    `json:"enabled"`
+	Policy            StoragePolicy           `json:"policy"`
+	DiskBytes         int64                   `json:"diskBytes"`
+	PayloadBytes      int64                   `json:"payloadBytes"`
+	ImageBytes        int64                   `json:"imageBytes"`
+	ThumbnailBytes    int64                   `json:"thumbnailBytes"`
+	ReplyBytes        int64                   `json:"replyBytes"`
+	QueueBytes        int64                   `json:"queueBytes"`
+	EventCount        int64                   `json:"eventCount"`
+	OperationCount    int64                   `json:"operationCount"`
+	BlobCount         int64                   `json:"blobCount"`
+	LastCleanupAt     int64                   `json:"lastCleanupAt"`
+	Warning           bool                    `json:"warning"`
+	FreeDiskBytes     int64                   `json:"freeDiskBytes"`
+	ReservedDiskBytes int64                   `json:"reservedDiskBytes"`
+	LowDisk           bool                    `json:"lowDisk"`
 }
 
 type durableStore struct {
@@ -339,7 +342,16 @@ func (s *durableStore) reply(id string) (replyBody, int, string, error) {
 	if err != nil {
 		return rep, 0, "", err
 	}
+	if terminal, ok := queueTerminalReply(state); ok {
+		return terminal, status, state, nil
+	}
 	if expires <= nowMs() {
+		// Content expiry cannot establish that an operation never executed.
+		// Keep both unknown delivery and a lost/truncated result distinguishable
+		// from a ticket which expired before dispatch, including after restart.
+		if state == "uncertain" || state == "truncated" {
+			return rep, status, state, nil
+		}
 		return rep, status, "expired", nil
 	}
 	if len(data) > 0 {
@@ -356,11 +368,39 @@ func (h *Hub) DurableStorageStatus() StorageStatus {
 	if s == nil {
 		return StorageStatus{}
 	}
+	// Receipt workers acquire receipts before store. Do not invert that order
+	// for a status read; a slightly older aggregate is sufficient for warning.
+	var receiptCount, ownerReceipts int64
+	if h.receipts != nil {
+		h.receipts.mu.Lock()
+		receiptCount = int64(len(h.receipts.entries))
+		owners := make(map[string]int64)
+		for _, entry := range h.receipts.entries {
+			owners[entry.Owner]++
+			ownerReceipts = max(ownerReceipts, owners[entry.Owner])
+		}
+		h.receipts.mu.Unlock()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := StorageStatus{Enabled: true, Policy: s.policy, DiskBytes: s.diskBytes(), LastCleanupAt: s.lastCleanup}
 	_ = s.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM events`).Scan(&out.EventCount, &out.PayloadBytes)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM operations`).Scan(&out.OperationCount)
+	operationErr := s.db.QueryRow(`SELECT COUNT(*) FROM operations`).Scan(&out.OperationCount)
+	var maxOwnerOperations, batches int64
+	ownerErr := s.db.QueryRow(`SELECT COALESCE(MAX(n),0) FROM (SELECT COUNT(*) AS n FROM operations GROUP BY owner)`).Scan(&maxOwnerOperations)
+	batchErr := s.db.QueryRow(`SELECT COUNT(*) FROM batches`).Scan(&batches)
+	out.CapacityKnown = operationErr == nil && ownerErr == nil && batchErr == nil
+	if out.CapacityKnown {
+		out.RecordCapacity = []StorageRecordCapacity{
+			recordCapacity("operations", "全站任务身份", out.OperationCount, maxDurableOperations),
+			recordCapacity("owner_operations", "单个连接最高任务身份", maxOwnerOperations, maxOwnerDurableOperations),
+			recordCapacity("receipts", "全站安全回执", receiptCount, maxCommandReceipts),
+			recordCapacity("owner_receipts", "单个连接最高安全回执", ownerReceipts, maxOwnerCommandReceipts),
+			recordCapacity("event_batches", "消息接收记录", batches, maxDurableBatches),
+		}
+	} else {
+		out.CapacityMessage = "暂时无法读取安全记录容量，请刷新重试；持续失败时检查服务器存储。"
+	}
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM blobs`).Scan(&out.BlobCount)
 	_ = s.db.QueryRow(`SELECT COALESCE(SUM(bytes),0) FROM blobs`).Scan(&out.ImageBytes)
 	_ = s.db.QueryRow(`SELECT COALESCE(SUM(bytes),0) FROM thumbnails`).Scan(&out.ThumbnailBytes)
@@ -368,6 +408,20 @@ func (h *Hub) DurableStorageStatus() StorageStatus {
 	_ = s.db.QueryRow(`SELECT COALESCE(SUM(bytes),0) FROM offline_queue`).Scan(&out.QueueBytes)
 	out.PayloadBytes += out.ImageBytes + out.ThumbnailBytes + out.ReplyBytes + out.QueueBytes
 	out.Warning = out.DiskBytes >= s.policy.GlobalBytes*70/100
+	for _, capacity := range out.RecordCapacity {
+		if capacity.Warning {
+			out.Warning = true
+			out.CapacityMessage = "防重复执行记录接近上限，请联系维护人员安排容量处理。清理到期内容只释放正文空间，不会删除这些安全记录。"
+		}
+		if capacity.Full {
+			out.CapacityMessage = operationCapacityMessage()
+			if capacity.Kind == "event_batches" {
+				out.CapacityMessage = "消息接收安全记录已满，暂不能接收新的消息批次。请联系维护人员安排容量处理；清理到期内容不会释放这些安全记录。"
+			}
+			break
+		}
+	}
+	out.Warning = out.Warning || !out.CapacityKnown
 	probe := s.volumeProbe
 	if probe == nil {
 		probe = storageVolume

@@ -49,6 +49,17 @@ type commandReceipt struct {
 // Only a durably accepted operation may keep waiting through SSE replacement.
 // This marker changes result delivery, never admission or command dispatch.
 type acceptedReceiptContextKey struct{}
+
+// Only definite admission rejections and actual replies are complete results.
+// Timeouts, shutdown and lost transport remain uncertain and never authorize
+// a replay. Share this classification with offline queue workers.
+func knownCommandResult(rep replyBody, status int) bool {
+	return status == http.StatusOK || status == http.StatusForbidden || status == http.StatusTooManyRequests ||
+		(status == http.StatusUpgradeRequired && rep.Code == "update_required") ||
+		(status == http.StatusConflict && rep.Error == "电脑不在线") ||
+		(status == http.StatusServiceUnavailable && rep.Error == "电脑正忙")
+}
+
 type commandReceipts struct {
 	store   *durableStore
 	mu      sync.Mutex
@@ -224,13 +235,14 @@ func (s *commandReceipts) restoreReplyLocked(key string, entry *commandReceipt) 
 	if err != nil {
 		return
 	}
-	if state == "completed" && !entry.cached {
+	_, terminal := queueTerminalReply(state)
+	if (state == "completed" || terminal) && !entry.cached {
 		s.cacheReplyLocked(entry, rep, status)
 		if entry.Version == 1 {
 			entry.ExpiresAt = maxCommandReceiptExpiry
 		}
 	}
-	if state != "completed" && entry.cached {
+	if state != "completed" && !terminal && entry.cached {
 		s.bytes -= len(entry.reply.Result) + len(entry.reply.Error) + len(entry.reply.Code)
 		entry.cached = false
 		entry.reply = replyBody{}
@@ -481,7 +493,7 @@ func (h *Hub) commandCapabilities() ([]string, int64) {
 		capabilities = append(capabilities, "station.standby.v1")
 	}
 	if h.durable != nil {
-		capabilities = append(capabilities, "commands.durable.v2", "events.durable.v1", "storage.blobs.v1", "events.binding-scope.v1", "session.projectless.v1")
+		capabilities = append(capabilities, "commands.durable.v2", "events.durable.v1", "storage.blobs.v1", "events.binding-scope.v1", "session.projectless.v1", "commands.queue-cancel.v1")
 	}
 	return capabilities, int64(commandReceiptTTL / time.Second)
 }
@@ -581,7 +593,7 @@ func (h *Hub) executeReceiptWithPolicy(ctx context.Context, accountID, deviceID,
 				h.remoteAccessGate.RUnlock()
 			}
 			s.mu.Unlock()
-			return replyBody{Error: "安全重试记录已达本站容量，请稍后重试"}, 429, "command_receipt_capacity"
+			return replyBody{Error: operationCapacityMessage()}, 429, "command_receipt_capacity"
 		}
 		entry = &commandReceipt{durableCommandReceipt: durableCommandReceipt{Version: 1, Owner: owner, Hash: payloadHash, ExpiresAt: nowMs() + commandReceiptTTL.Milliseconds()}, done: make(chan struct{})}
 		if _, ok := ctx.Value(ticketDeadlineKey{}).(int64); ok {
@@ -605,7 +617,7 @@ func (h *Hub) executeReceiptWithPolicy(ctx context.Context, accountID, deviceID,
 			s.mu.Lock()
 			entry.completed = true
 			// A timeout or interrupted relay may have delivered the operation already.
-			known := status == 200 || status == 403 || status == 429 || (status == 409 && rep.Error == "电脑不在线") || (status == 503 && rep.Error == "电脑正忙")
+			known := knownCommandResult(rep, status)
 			if s.store != nil && s.store.saveReply(key, owner, rep, status, known) != nil {
 				known = false
 			}

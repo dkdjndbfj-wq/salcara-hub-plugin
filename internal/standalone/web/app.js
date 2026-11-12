@@ -515,14 +515,16 @@
   function cleanupDays(days, label) { return Number(days) > 0 ? `${label}离线超过 ${Number(days)} 天清理` : `${label}不清理`; }
   function renderStorage(s) {
     if (!$('storage-form')) return;
-    $('storage-current').textContent = !s?.enabled ? '未启用' : s.lowDisk ? '磁盘预留空间不足' : s.warning ? '容量接近上限' : '已启用';
+    const records = Array.isArray(s?.recordCapacity) ? s.recordCapacity : [];
+    $('storage-current').textContent = !s?.enabled ? '未启用' : s.capacityKnown === false ? '容量读取失败' : s.lowDisk ? '磁盘预留空间不足' : records.some(r => r.full) ? '安全记录已满' : s.warning ? '容量接近上限' : '已启用';
     if (!s?.enabled) return;
     const p = s.policy;
     if (!storageDirty) {
       for (const [id,value] of [['storage-days',p.retentionDays],['storage-global',Math.floor(p.globalBytes/1048576)],['storage-binding',Math.floor(p.bindingBytes/1048576)]]) $(id).value=String(value);
       $('storage-queue').checked=Boolean(p.offlineQueueEnabled);
     }
-    $('storage-details').textContent=`磁盘占用 ${(s.diskBytes/1048576).toFixed(1)} MiB（包含数据库、WAL、未完成上传和缩略图）；保留 ${s.eventCount} 条事件、${s.blobCount} 张图片。上次清理：${moment(s.lastCleanupAt)}。${s.lowDisk?'磁盘空间低于安全预留，新的正文和图片暂缓接收。':''}`;
+    const capacity = records.map(r => `${r.label} ${Number(r.used).toLocaleString()} / ${Number(r.limit).toLocaleString()}`).join('；');
+    $('storage-details').textContent=`磁盘占用 ${(s.diskBytes/1048576).toFixed(1)} MiB；保留 ${s.eventCount} 条事件、${s.blobCount} 张图片。上次清理：${moment(s.lastCleanupAt)}。${capacity ? `安全记录：${capacity}。` : ''}${s.capacityMessage || ''}${s.lowDisk?'磁盘空间低于安全预留，新的正文和图片暂缓接收。':''}`;
   }
   async function saveStorage(runNow) {
     if(busy) return;
@@ -540,10 +542,10 @@
     const c = value.device_cleanup;
     if (!c || typeof c !== 'object') { $('cleanup-current').textContent = '设置不可用'; return; }
     const on = Number(c.unpaired_days) > 0 || Number(c.paired_days) > 0;
-    $('cleanup-current').textContent = on ? '已开启' : '已关闭'; $('cleanup-current').className = on ? 'pill ok' : 'pill';
+    $('cleanup-current').textContent = c.last_error ? '清理未完成' : on ? '已开启' : '已关闭'; $('cleanup-current').className = c.last_error ? 'pill' : on ? 'pill ok' : 'pill';
     if (document.activeElement !== $('cleanup-unpaired')) $('cleanup-unpaired').value = String(Number(c.unpaired_days) || 0);
     if (document.activeElement !== $('cleanup-paired')) $('cleanup-paired').value = String(Number(c.paired_days) || 0);
-    $('cleanup-details').textContent = `${cleanupDays(c.unpaired_days, '未配对电脑')}；${cleanupDays(c.paired_days, '已配对电脑')}。上次检查：${moment(c.last_run_at)}${Number(c.last_run_at) > 0 ? `，清理 ${Number(c.last_removed) || 0} 台` : ''}。`;
+    $('cleanup-details').textContent = `${cleanupDays(c.unpaired_days, '未配对电脑')}；${cleanupDays(c.paired_days, '已配对电脑（含 Bot 手机绑定）')}。上次检查：${moment(c.last_run_at)}${Number(c.last_run_at) > 0 ? `，清理 ${Number(c.last_removed) || 0} 台` : ''}。${c.last_error || ''}`;
     syncUpdateButtons();
   }
   function readDays(id) { const raw = $(id).value.trim(); const n = Number(raw); return raw !== '' && Number.isInteger(n) && n >= 0 && n <= 3650 ? n : null; }
@@ -553,7 +555,7 @@
     if (unpaired === null || paired === null) { note('清理天数需为 0 到 3650 之间的整数，0 表示不清理。', true); return; }
     cleanupCandidate = { unpaired_days: unpaired, paired_days: paired, confirm: true };
     $('cleanup-dialog-title').textContent = '保存自动清理设置';
-    $('cleanup-target').textContent = `${cleanupDays(unpaired, '未配对电脑')}；${cleanupDays(paired, '已配对电脑')}。保存后会立即按新规则检查一次${paired > 0 ? '；被清理的已配对电脑需要在手机上重新扫码' : ''}。`;
+    $('cleanup-target').textContent = `${cleanupDays(unpaired, '未配对电脑')}；${cleanupDays(paired, '已配对电脑（含 Bot 手机绑定）')}。保存后会立即按新规则检查一次${paired > 0 ? '；被清理的电脑需重新扫码或导入有效 Bot 绑定包' : ''}。`;
     $('cleanup-dialog').showModal();
   });
   $('cleanup-run').addEventListener('click', () => {

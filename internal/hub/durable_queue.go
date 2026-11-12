@@ -2,9 +2,17 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
+)
+
+const (
+	maxOfflineQueued          = 64
+	maxOwnerOfflineQueued     = 4
+	maxOfflineDispatchPerPass = 8
 )
 
 type offlineIntent struct {
@@ -46,10 +54,6 @@ func (h *Hub) maybeQueueOffline(w http.ResponseWriter, r *http.Request, acct str
 	h.mu.Unlock()
 	if online {
 		return false
-	}
-	if deadline <= nowMs() {
-		writeJSON(w, 409, map[string]any{"code": "execution_ticket_expired", "error": "离线发送期限已过，未发送"})
-		return true
 	}
 	credential := h.receiptCredential(acct, r)
 	owner := shaHex(acct + "\x00" + req.DeviceID + "\x00" + credential)
@@ -95,36 +99,66 @@ func (h *Hub) maybeQueueOffline(w http.ResponseWriter, r *http.Request, acct str
 				return nil
 			}
 		} else {
-			if len(h.receipts.entries) >= maxCommandReceipts {
-				status, out = 429, map[string]any{"error": "安全操作记录已满"}
+			ownedReceipts := 0
+			for _, entry := range h.receipts.entries {
+				if entry.Owner == owner {
+					ownedReceipts++
+				}
+			}
+			if len(h.receipts.entries) >= maxCommandReceipts || ownedReceipts >= maxOwnerCommandReceipts {
+				status, out = 429, map[string]any{"code": "command_receipt_capacity", "error": operationCapacityMessage()}
 				return nil
 			}
+			intent := offlineIntent{Account: acct, DeviceID: req.DeviceID, Scope: scope, Command: req.Command, Source: source}
+			raw, _ := json.Marshal(intent)
+			encrypted, e := s.seal(raw, "queue:"+key)
+			if e != nil {
+				return e
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			var count, owned int
+			e = s.db.QueryRow(`SELECT COUNT(*),COUNT(CASE WHEN owner=? THEN 1 END) FROM offline_queue WHERE state='queued'`, owner).Scan(&count, &owned)
+			if e == nil && (count >= maxOfflineQueued || owned >= maxOwnerOfflineQueued) {
+				e = errStorageCapacity
+			}
+			if e == nil {
+				e = s.capacityLocked(scope, int64(len(encrypted)))
+			}
+			if e != nil {
+				if errors.Is(e, errStorageCapacity) {
+					status, out = 429, map[string]any{"code": "offline_queue_capacity", "error": "待发队列或存储空间已满，任务尚未入队。请撤回不用的待发任务，或待电脑上线后重试原任务。"}
+					return nil
+				}
+				return e
+			}
+			// Reject known capacity failures before consuming the disk replay fence.
 			entry := &commandReceipt{durableCommandReceipt: durableCommandReceipt{Version: 2, Owner: owner, Hash: shaHex(canonical), ExpiresAt: nowMs() + 30*durableDay}, done: make(chan struct{})}
 			if err := h.receipts.persistLocked(key, entry.durableCommandReceipt); err != nil {
 				return err
 			}
 			h.receipts.entries[key] = entry
-			intent := offlineIntent{Account: acct, DeviceID: req.DeviceID, Scope: scope, Command: req.Command, Source: source}
-			raw, _ := json.Marshal(intent)
-			encrypted, e := s.seal(raw, "queue:"+key)
-			if e == nil {
-				s.mu.Lock()
-				var count, owned int
-				e = s.db.QueryRow(`SELECT COUNT(*),COUNT(CASE WHEN owner=? THEN 1 END) FROM offline_queue WHERE state='queued'`, owner).Scan(&count, &owned)
-				if e == nil && (count >= 64 || owned >= 4) {
-					e = errStorageCapacity
-				}
-				if e == nil {
-					e = s.capacityLocked(scope, int64(len(encrypted)))
-				}
-				if e == nil {
-					_, e = s.db.Exec(`INSERT INTO offline_queue(id,owner,scope,deadline,state,body,bytes) VALUES(?,?,?,?,'queued',?,?)`, key, owner, scope, deadline, encrypted, len(encrypted))
-				}
-				s.mu.Unlock()
-			}
+			_, e = s.db.Exec(`INSERT INTO offline_queue(id,owner,scope,deadline,state,body,bytes) VALUES(?,?,?,?,'queued',?,?)`, key, owner, scope, deadline, encrypted, len(encrypted))
 			if e != nil {
+				var storedState string
+				lookupErr := s.db.QueryRow(`SELECT state FROM offline_queue WHERE id=?`, key).Scan(&storedState)
+				if lookupErr == nil && storedState == "queued" {
+					out = map[string]any{"ok": true, "state": "queued", "queued": true, "requestId": req.RequestID, "operationId": req.RequestID, "dispatchNotAfter": deadline, "storageEpoch": s.epoch}
+					return nil
+				}
 				entry.completed = true
 				close(entry.done)
+				// Only a confirmed absent queue row establishes non-dispatch. If
+				// the DB itself cannot confirm that fact, preserve uncertainty.
+				if errors.Is(lookupErr, sql.ErrNoRows) {
+					_, saveErr := s.db.Exec(`INSERT INTO replies(id,owner,body,status,expires,state,bytes) VALUES(?,?,NULL,409,?,'queue_rejected',0)`, key, owner, nowMs()+int64(s.policy.RetentionDays)*durableDay)
+					if saveErr == nil {
+						h.cacheQueueTerminalLocked(key, "queue_rejected")
+						rep, _ := queueTerminalReply("queue_rejected")
+						status, out = 409, map[string]any{"ok": false, "code": rep.Code, "error": rep.Error}
+						return nil
+					}
+				}
 				status, out = 503, map[string]any{"code": "command_delivery_uncertain", "error": "原操作未能完成登记，请查询原回执；不会重新分配身份"}
 				return nil
 			}
@@ -168,29 +202,41 @@ func (h *Hub) dispatchOfflineQueue() {
 	queueEnabled := s.policy.OfflineQueueEnabled
 	s.mu.Unlock()
 	type row struct {
-		id, owner string
-		deadline  int64
-		body      []byte
+		id, owner, scope string
+		deadline         int64
+		body             []byte
 	}
 	var pending []row
-	rows, err := s.db.Query(`SELECT id,owner,deadline,body FROM offline_queue WHERE state='queued' ORDER BY deadline LIMIT 8`)
+	// Scan the bounded queue, not only the dispatch budget. Skipped offline
+	// owners must not hide another owner's newly online computer indefinitely.
+	rows, err := s.db.Query(`SELECT id,owner,scope,deadline,body FROM offline_queue WHERE state='queued' ORDER BY deadline,id LIMIT ?`, maxOfflineQueued)
 	if err != nil {
 		return
 	}
 	for rows.Next() {
 		var item row
-		if rows.Scan(&item.id, &item.owner, &item.deadline, &item.body) == nil {
+		if rows.Scan(&item.id, &item.owner, &item.scope, &item.deadline, &item.body) == nil {
 			pending = append(pending, item)
 		}
 	}
 	rows.Close()
+	dispatched := 0
 	for _, item := range pending {
+		if dispatched >= maxOfflineDispatchPerPass {
+			break
+		}
+		if item.deadline <= nowMs() {
+			h.finishUnsentQueue(item.id, item.owner, item.scope, "dispatch_expired")
+			continue
+		}
 		raw, err := s.open(item.body, "queue:"+item.id)
 		if err != nil {
+			h.finishUnsentQueue(item.id, item.owner, item.scope, "queue_unavailable")
 			continue
 		}
 		var intent offlineIntent
-		if json.Unmarshal(raw, &intent) != nil {
+		if json.Unmarshal(raw, &intent) != nil || intent.Scope != item.scope {
+			h.finishUnsentQueue(item.id, item.owner, item.scope, "queue_unavailable")
 			continue
 		}
 		h.mu.Lock()
@@ -216,6 +262,7 @@ func (h *Hub) dispatchOfflineQueue() {
 		e := h.receipts.entries[item.id]
 		if e == nil {
 			h.receipts.mu.Unlock()
+			h.finishUnsentQueue(item.id, item.owner, item.scope, "queue_unavailable")
 			continue
 		}
 		result, err := s.db.Exec(`UPDATE offline_queue SET state='claimed' WHERE id=? AND state='queued'`, item.id)
@@ -228,6 +275,7 @@ func (h *Hub) dispatchOfflineQueue() {
 			h.receipts.mu.Unlock()
 			continue
 		}
+		dispatched++
 		if e.completed {
 			e.completed = false
 			e.done = make(chan struct{})
@@ -262,7 +310,7 @@ func (h *Hub) dispatchOfflineQueue() {
 					return "", intent.Source
 				})
 			}
-			known := expired || !authorized || !validPolicy || status == 200 || status == 403 || status == 429
+			known := expired || !authorized || !validPolicy || knownCommandResult(rep, status)
 			if s.saveReply(item.id, item.owner, rep, status, known) != nil {
 				known = false
 			}
@@ -279,5 +327,25 @@ func (h *Hub) dispatchOfflineQueue() {
 			}
 			_, _ = s.db.Exec(`UPDATE offline_queue SET state=?,body=NULL,bytes=0 WHERE id=?`, state, item.id)
 		}(item, intent, e, expired, authorized, validPolicy)
+	}
+}
+
+// Terminalize only an unclaimed row; missing receipts or unreadable content
+// must neither permit replay nor strand encrypted payload and queue capacity.
+func (h *Hub) finishUnsentQueue(key, owner, scope, state string) {
+	h.receipts.mu.Lock()
+	defer h.receipts.mu.Unlock()
+	if h.receipts.closed {
+		return
+	}
+	s := h.durable
+	s.mu.Lock()
+	changed, err := s.finishQueuedLocked(key, owner, scope, state)
+	s.mu.Unlock()
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		h.log.Error("offline queue recovery failed", "err", err)
+	}
+	if changed {
+		h.cacheQueueTerminalLocked(key, state)
 	}
 }

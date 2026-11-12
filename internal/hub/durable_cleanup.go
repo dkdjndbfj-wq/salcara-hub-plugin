@@ -103,7 +103,7 @@ func (s *durableStore) cleanupLocked(now int64) error {
 	}
 	// Bodies are removed without erasing the anti-replay identity.
 	for _, lane := range []struct{ query, remove string }{
-		{`SELECT id,bytes FROM replies WHERE expires<=? AND body IS NOT NULL LIMIT ?`, `UPDATE replies SET body=NULL,bytes=0,state=CASE WHEN state='uncertain' THEN 'uncertain' ELSE 'expired' END WHERE id=?`},
+		{`SELECT id,bytes FROM replies WHERE expires<=? AND body IS NOT NULL LIMIT ?`, `UPDATE replies SET body=NULL,bytes=0,state=CASE WHEN state IN ('uncertain','truncated','cancelled','dispatch_expired','queue_unavailable') THEN state ELSE 'expired' END WHERE id=?`},
 		{`SELECT id,COALESCE(length(body),0) FROM push_jobs WHERE expires<=? LIMIT ?`, `DELETE FROM push_jobs WHERE id=?`},
 		{`SELECT id,length(body) FROM push_notices WHERE expires<=? LIMIT ?`, `DELETE FROM push_notices WHERE id=?`},
 		{`SELECT rowid,0 FROM event_budgets WHERE expires<=? LIMIT ?`, `DELETE FROM event_budgets WHERE rowid=?`},

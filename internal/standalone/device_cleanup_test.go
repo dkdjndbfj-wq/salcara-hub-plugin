@@ -60,7 +60,7 @@ func TestDeviceCleanupSettingPersistsAcrossRestartAndValidates(t *testing.T) {
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if w := adminRequest(t, restarted, http.MethodPost, Prefix+"/_admin/v1/device-cleanup", admin, map[string]any{"unpaired_days": 1, "paired_days": 1, "confirm": true}); w.Code != 500 || restarted.hub.CurrentDeviceCleanup().UnpairedDays != 14 {
+	if w := adminRequest(t, restarted, http.MethodPost, Prefix+"/_admin/v1/device-cleanup", admin, map[string]any{"unpaired_days": 1, "paired_days": 1, "confirm": true}); w.Code != 503 || !strings.Contains(w.Body.String(), "清理设置未保存") || restarted.hub.CurrentDeviceCleanup().UnpairedDays != 14 {
 		t.Fatal("failed save changed the running policy")
 	}
 }

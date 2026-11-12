@@ -137,8 +137,8 @@ func (h *Hub) handleOperationPrepare(w http.ResponseWriter, r *http.Request, acc
 			if err = s.db.QueryRow(`SELECT COUNT(*),COUNT(CASE WHEN owner=? THEN 1 END) FROM operations`, owner).Scan(&count, &owned); err != nil {
 				return err
 			}
-			if count >= 65536 || owned >= 4096 {
-				status, out = 429, map[string]any{"code": "operation_capacity", "error": "安全操作记录已达容量"}
+			if count >= maxDurableOperations || owned >= maxOwnerDurableOperations {
+				status, out = 429, map[string]any{"code": "operation_capacity", "error": operationCapacityMessage()}
 				return nil
 			}
 			id = uuid.NewString()
@@ -270,7 +270,8 @@ func (h *Hub) handleOperationRead(w http.ResponseWriter, r *http.Request, acct s
 	if err == nil {
 		out["state"] = persisted
 		out["httpStatus"] = status
-		if persisted == "completed" {
+		_, terminal := queueTerminalReply(persisted)
+		if persisted == "completed" || terminal {
 			out["ok"] = rep.OK
 			if len(rep.Result) > 0 {
 				out["result"] = rep.Result
@@ -280,6 +281,15 @@ func (h *Hub) handleOperationRead(w http.ResponseWriter, r *http.Request, acct s
 			}
 			if rep.Code != "" {
 				out["code"] = rep.Code
+			}
+			if persisted == "cancelled" {
+				out["cancelled"] = true
+			}
+			if persisted == "dispatch_expired" {
+				out["state"] = "expired"
+			}
+			if persisted == "queue_unavailable" || persisted == "queue_rejected" {
+				out["state"] = "not_dispatched"
 			}
 		}
 		if persisted == "truncated" {

@@ -381,7 +381,7 @@ func (h *Hub) executeCommandGuarded(ctx context.Context, accountID, deviceID str
 	conn := dev.conn
 	if h.desktopUpdateRequired(dev.info.Version, command) {
 		h.mu.Unlock()
-		return replyBody{Error: h.desktopUpdateMessage()}, 426
+		return replyBody{Error: h.desktopUpdateMessage(), Code: "update_required"}, http.StatusUpgradeRequired
 	}
 	standby := false
 	if conn == nil && authorize != nil {
@@ -446,7 +446,7 @@ func (h *Hub) executeCommandGuarded(ctx context.Context, accountID, deviceID str
 			return replyBody{Error: "电脑不在线"}, 409
 		}
 		if h.desktopUpdateRequired(dev.info.Version, command) {
-			return replyBody{Error: h.desktopUpdateMessage()}, 426
+			return replyBody{Error: h.desktopUpdateMessage(), Code: "update_required"}, http.StatusUpgradeRequired
 		}
 		// A closed connection can still have room in cmds; a single select
 		// would randomly enqueue instead of choosing its closed signal.

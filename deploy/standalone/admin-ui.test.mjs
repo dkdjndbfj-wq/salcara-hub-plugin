@@ -75,6 +75,28 @@ test('storage drafts survive refresh, and edits made during save stay unsaved', 
   b.replies.push(response(storageState(14)));await b.ids.get('storage-form').emit('submit');assert.match(b.ids.get('notice').textContent,/存储设置已保存/);
 });
 
+test('storage capacity warnings explain identity retention and incomplete reads', async () => {
+  const b = browser();
+  await b.login(state({ durable_storage: { ...storageState(7), capacityKnown: true, warning: true,
+    capacityMessage: '清理到期内容不会删除这些安全记录。',
+    recordCapacity: [{ kind: 'owner_operations', label: '单个连接最高任务身份', used: 4096, limit: 4096, warning: true, full: true }] } }));
+  assert.equal(b.ids.get('storage-current').textContent, '安全记录已满');
+  assert.match(b.ids.get('storage-details').textContent, /单个连接最高任务身份/);
+  assert.match(b.ids.get('storage-details').textContent, /不会删除/);
+  b.replies.push(response(state({ durable_storage: { ...storageState(7), capacityKnown: false, warning: true, capacityMessage: '请刷新重试' } })));
+  await b.ids.get('refresh').emit('click');
+  assert.equal(b.ids.get('storage-current').textContent, '容量读取失败');
+  assert.match(b.ids.get('storage-details').textContent, /请刷新重试/);
+});
+
+test('partial device cleanup displays the persisted outcome and recovery direction', async () => {
+  const b = browser();
+  await b.login(state({ device_cleanup: { unpaired_days: 7, paired_days: 0, last_run_at: 1, last_removed: 1, last_error: '电脑已清理，绑定组记录尚未同步；请再次清理。' } }));
+  assert.equal(b.ids.get('cleanup-current').textContent, '清理未完成');
+  assert.match(b.ids.get('cleanup-details').textContent, /Bot 手机绑定/);
+  assert.match(b.ids.get('cleanup-details').textContent, /绑定组记录尚未同步/);
+});
+
 test('leaving the page clears sensitive Bot binding and storage state', async () => {
   const b=browser();await b.login(state({durable_storage:storageState(7)}));
   b.ids.get('bot-binding-value').value='private-fixture-binding';b.ids.get('bot-binding-result').hidden=false;b.ids.get('bot-groups').append(new Element());

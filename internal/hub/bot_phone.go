@@ -209,7 +209,7 @@ func writeBotPhonePending(w http.ResponseWriter, code string) {
 }
 
 func (h *Hub) writeBotSnapshot(st persistedBotState) error {
-	if h.cfg.DataDir == "" {
+	if h.cfg.DeploymentMode != "bot" || h.cfg.DataDir == "" {
 		return nil
 	}
 	b, err := json.Marshal(st)

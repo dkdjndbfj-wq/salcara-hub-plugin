@@ -73,6 +73,7 @@ type Hub struct {
 	bannedDeviceIDs         map[string]bool
 	adminAudit              []AdminAudit
 	saveMu                  sync.Mutex
+	cleanupBotPending       bool // guarded by saveMu; devices committed before Bot membership
 	// Process-local revocation epochs, guarded by mu. A failed persistence must
 	// not turn a repeated phone revoke into an apparently final 401/403.
 	pairRevocationEpoch      uint64
@@ -194,6 +195,7 @@ func New(cfg Config) (*Hub, error) {
 		"/app/commands/prepare":        {http.MethodPost, true, h.handleOperationPrepare},
 		"/app/operations":              {http.MethodGet, true, h.handleOperationRead},
 		"/app/operations/ack":          {http.MethodPost, true, h.handleOperationAck},
+		"/app/operations/cancel":       {http.MethodPost, true, h.handleOperationCancel},
 		"/app/source/challenge":        {http.MethodPost, true, h.handleSourceChallenge},
 		"/app/source/grant":            {http.MethodPost, true, h.handleSourceGrant},
 		"/bridge/source/challenge":     {http.MethodGet, true, h.handleBridgeSourceChallenge},
@@ -219,6 +221,11 @@ func New(cfg Config) (*Hub, error) {
 	if err := h.loadBotPhoneIntents(); err != nil {
 		return nil, err
 	}
+	// devices.json is authoritative. A crash between cleanup's two writes must
+	// never restore a deleted computer's group access or consume its old slot.
+	h.mu.Lock()
+	h.pruneBotComputersLocked()
+	h.mu.Unlock()
 	if err := h.ensureBotSigningKey(); err != nil {
 		return nil, err
 	}
@@ -1327,7 +1334,14 @@ func (h *Hub) handleAppCommands(w http.ResponseWriter, r *http.Request, acct str
 		}
 		return h.executionSourceFor(acct, r, req)
 	}
-	if code, _ := sourceCheck(); code != "" && !h.cachedReceiptReplay(execAcct, r, req) {
+	// A retained result describes an earlier operation. It must be recovered
+	// before new-admission checks (ticket expiry, offline queue or attachments)
+	// can incorrectly relabel that operation as never sent.
+	if h.cachedReceiptReplay(execAcct, r, req) {
+		h.handleReceiptCommand(w, r, execAcct, req, nil)
+		return
+	}
+	if code, _ := sourceCheck(); code != "" {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "远程来源策略拒绝此操作", "code": code, "retryable": false})
 		return
 	}

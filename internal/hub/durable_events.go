@@ -89,7 +89,7 @@ func (s *durableStore) storeEvents(scope, batch, digest string, events []*stored
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM batches`).Scan(&count); err != nil {
 			return err
 		}
-		if count >= 200000 {
+		if count >= maxDurableBatches {
 			return errStorageCapacity
 		}
 	}
