@@ -8,6 +8,8 @@ Salcara Hub 是可自托管的远程编程连接服务，适合个人团队和�
 
 Hub 不运行大模型，也不要求用户提交中转站账号或模型 API Key。任务由电脑端执行；管理人员可以在独立网页控制台管理连接和设备。
 
+当前稳定版：[Hub 0.5.7](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases/tag/standalone-v0.5.7)，配套 [手机 App 1.8.7](https://github.com/dkdjndbfj-wq/salcara-image-mobile/releases/tag/v1.8.7) 和 [桌面 App 1.6.10](https://github.com/dkdjndbfj-wq/salcara-desktop/releases/tag/v1.6.10)，均已正式发布。Hub 0.5.7 同步首页和状态页的配套版本展示，未提高最低兼容版本；发布不会自动升级现有服务器，页面版本需在部署新版 Hub 后才会更新。
+
 ## 界面预览
 
 以下截图来自已发布的 Hub 0.5.3 管理控制台，使用演示用户、设备与来源地址。
@@ -42,10 +44,10 @@ Hub 不运行大模型，也不要求用户提交中转站账号或模型 API Ke
 
 准备一台 Linux 主机、Docker Engine / Compose、自己控制的域名和 HTTPS 反向代理。支持的镜像平台为 `linux/amd64` 和 `linux/arm64`。
 
-以下安装示例以 0.5.3 为目标。执行前在 [Releases](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases) 确认 `standalone-v0.5.3` 已正式发布且同版本镜像可拉取；源码或文档更新不代表发布完成。在本地审阅该版本脚本后执行：
+以下新安装示例使用已正式发布的 [Hub 0.5.7](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases/tag/standalone-v0.5.7) 及同版本镜像。在本地审阅该版本脚本后执行；已有部署请先备份并按部署指南升级，不要重新初始化：
 
 ```sh
-git clone --branch standalone-v0.5.3 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
+git clone --branch standalone-v0.5.7 --depth 1 https://github.com/dkdjndbfj-wq/salcara-hub-plugin.git salcara-hub
 cd salcara-hub
 bash deploy/standalone/install.sh \
   --public-url https://relay.example.com/salcara-hub \
@@ -54,7 +56,7 @@ bash deploy/standalone/install.sh \
 
 把示例域名换成自己的域名。安装脚本会创建独立 Hub 服务，给出管理地址、密钥文件位置及反代配置片段；它不会安装 Docker、修改现有反代或停止其他服务。已有 Hub 数据的用户请走升级步骤，不要重新初始化。
 
-完整的反代配置、手动安装、迁移和验收步骤见 [部署教程](docs/STANDALONE-DOCKER.zh.md)。也可以把 [Agent 部署指南](docs/AGENT-DEPLOY.zh.md) 交给你的编程 Agent，完成后让它提供实际 URL 和待验收项。
+完整的反代配置、手动安装、迁移和验收步骤见 [0.5.7 部署教程](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/blob/standalone-v0.5.7/docs/STANDALONE-DOCKER.zh.md)。也可以把 [0.5.7 Agent 部署指南](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/blob/standalone-v0.5.7/docs/AGENT-DEPLOY.zh.md) 交给你的编程 Agent，完成后让它提供实际 URL 和待验收项。
 
 协议升级时的最低桌面版本设置与旧客户端迁移顺序见 [桌面版本兼容性](docs/DESKTOP-COMPATIBILITY.zh.md)。
 
@@ -81,12 +83,12 @@ bash deploy/standalone/install.sh \
 
 0.5.3 新增独立的「版本更新」页面。使用包含新版启动器的 Docker 镜像后，服务启动时自动检查新版本，默认每 6 小时再检查一次；左上角显示当前版本，发现签名新版后版本号变色，点击即可确认更新，也可在更新页面点击「一键更新」。页面显示当前版本、最新版本、最近检查和下次检查时间，也可随时手动检查。
 
-一键更新安装签名验证后的 Hub 程序，保留管理密钥、设备绑定和持久数据，重启后需要重新登录。Docker 基础镜像和启动器通过 Compose 升级；已有安装首次启用后台定时检查，需要切换到包含新启动器的已发布镜像。仓库代码不代表正式镜像已经发布。所有升级、恢复和卸载都应先备份，保留原项目与数据卷。检测周期与部署步骤见 [更新与资源](docs/STANDALONE-DOCKER.zh.md#更新与资源)。
+一键更新安装签名验证后的 Hub 程序，保留管理密钥、设备绑定和持久数据，重启后需要重新登录。Docker 基础镜像和启动器通过 Compose 升级；已有安装首次启用后台定时检查，需要切换到包含新启动器的已发布镜像。仓库代码不代表正式镜像已经发布。所有升级、恢复和卸载都应先备份，保留原项目与数据卷。检测周期与部署步骤见 [更新与资源](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/blob/standalone-v0.5.7/docs/STANDALONE-DOCKER.zh.md#更新与资源)。
 
-- [部署、升级、恢复密钥与卸载](docs/STANDALONE-DOCKER.zh.md)
-- [交给 Agent 部署](docs/AGENT-DEPLOY.zh.md)
+- [部署、升级、恢复密钥与卸载](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/blob/standalone-v0.5.7/docs/STANDALONE-DOCKER.zh.md)
+- [交给 Agent 部署](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/blob/standalone-v0.5.7/docs/AGENT-DEPLOY.zh.md)
 - [正式版本下载与说明](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/releases)
-- [发布维护说明](docs/STANDALONE-RELEASE.zh.md)
+- [发布维护说明](https://github.com/dkdjndbfj-wq/salcara-hub-plugin/blob/standalone-v0.5.7/docs/STANDALONE-RELEASE.zh.md)
 
 ## 安全与资源
 
