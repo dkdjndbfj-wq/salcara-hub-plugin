@@ -1,8 +1,8 @@
 # Salcara Hub：发布与更新维护
 
-产品标识 `salcara-hub-standalone`，本轮正式发布目标为 **0.5.6**；目标镜像 `ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.6`，目标 Git 标签 `standalone-v0.5.6`，新认证版本更新清单 `updates/standalone-account.json`。本文中的版本号是发布准备配置，安装和升级命令须在正式 Release、公开可拉取镜像及实际下载校验全部确认后执行。发布时保留兼容标识和已发布版本的公开下载地址；新版本替换当前更新指针，但不重签或覆盖旧版本资产、旧协议更新源。
+产品标识 `salcara-hub-standalone`，本轮正式发布目标为 **0.5.7**；目标镜像 `ghcr.io/dkdjndbfj-wq/salcara-hub-standalone:0.5.7`，目标 Git 标签 `standalone-v0.5.7`，新认证版本更新清单 `updates/standalone-account.json`。本文中的版本号是发布准备配置，安装和升级命令须在正式 Release、公开可拉取镜像及实际下载校验全部确认后执行。发布时保留兼容标识和已发布版本的公开下载地址；新版本替换当前更新指针，但不重签或覆盖旧版本资产、旧协议更新源。
 
-本次配套版本为 **Android 1.8.6（versionCode 27）/ Desktop（Bridge）1.6.9**，沿用既有发布签名身份，不提高最低准入版本。0.5.6 主要修复任务回执、离线队列、Bot 设备清理与安全记录容量提示，新增仅限未派发任务的持久撤回；登记失败分类与同身份重试修复见 [0.5.6 版本说明](RELEASE-0.5.6.md)。发布前须重新核对实际 tag、Release、镜像和更新指针，不以旧文档推断当前公开版本；本次尚未执行用户线上 Hub 部署，配套版本页只有在对应 Hub 构建实际运行后才会更新。
+本次配套版本为 **Android 1.8.7（versionCode 28）/ Desktop（Bridge）1.6.10**。Hub 0.5.7 仅同步公开首页和状态页的配套版本清单，并更新本版构建、安装目标与文档；不改 Hub 业务、身份、配置或最低准入策略，沿用既有发布签名身份。客户端修复由对应客户端提供，不是 Hub 0.5.7 新增的业务修复；本轮范围见 [0.5.7 版本说明](RELEASE-0.5.7.md)，0.5.6 既有修复保留在 [历史说明](RELEASE-0.5.6.md)。本轮先准备正式构建、独立产物验证和 Release 草稿；三端统一确认后才公开，实际公开下载验签成功后才推进账号更新源。正式公开与线上部署须分别记录；不能从候选源码或草稿推定完成，配套版本页只有在对应 Hub 构建实际运行后才会更新。
 
 0.5.0 首次部署自动生成每站独立的管理密钥，没有账号。0.4.0 的管理令牌不再用于管理页登录。旧安装不能直接通过网页跨过认证迁移：先按 [部署指南](STANDALONE-DOCKER.zh.md) 停机备份、生成新认证文件，再切换镜像；配对及设备数据保留。旧更新源停留在 0.4.0，新安装只使用新更新源。
 
@@ -18,7 +18,7 @@
 
 ## 首次及以后发布
 
-1. 完成源码审查，在准备发布的固定 commit 运行 `Standalone release build`，输入裸版本号，例如 `0.5.6`；默认 `publish_image=false` 只构建验证，不部署服务器。一次构建导出包含 provenance / SBOM 的双架构 `image.tar` OCI 归档。构建阶段设置正式镜像名称以生成非空的证明 subject，但不上传镜像。CI 校验整个引用图的大小 / SHA-256、平台、版本及每架构证明的 subject 绑定，再从该归档导入 amd64，运行实际非 root / 只读容器测试；从已导入镜像再次 `docker image save` 得到的 config 原始字节摘要必须与 OCI config digest 一致。不把 `docker inspect.Id` 一律当作 config digest：新版 containerd 镜像存储可能返回 manifest digest。arm64 只导入、检查并从未启动的容器导出二进制，不属于实机验收。
+1. 完成源码审查，在准备发布的固定 commit 运行 `Standalone release build`，输入裸版本号，例如 `0.5.7`；默认 `publish_image=false` 只构建验证，不部署服务器。一次构建导出包含 provenance / SBOM 的双架构 `image.tar` OCI 归档。构建阶段设置正式镜像名称以生成非空的证明 subject，但不上传镜像。CI 校验整个引用图的大小 / SHA-256、平台、版本及每架构证明的 subject 绑定，再从该归档导入 amd64，运行实际非 root / 只读容器测试；从已导入镜像再次 `docker image save` 得到的 config 原始字节摘要必须与 OCI config digest 一致。不把 `docker inspect.Id` 一律当作 config digest：新版 containerd 镜像存储可能返回 manifest digest。arm64 只导入、检查并从未启动的容器导出二进制，不属于实机验收。
 2. 验证 CI 成功以及提交 SHA 后，下载对应 `standalone-release-版本号` artifact。它包含同一 OCI 归档、`image-receipt.json`、从该镜像导出的两架构 Hub / launcher、`SHA256SUMS` 和未签名的 `standalone-payload.json`。receipt 记录源码 SHA、归档哈希 / 大小、multiarch index digest 和两架构 config / manifest digest。检查实际二进制大小 / 哈希与 payload 一致。不能把未签名 payload 放进更新源。
 3. 在同一源码 commit 用仓库外、既有 `salcara-local-20260930` Ed25519 私钥签名；不换发布者身份，不把私钥上传 GitHub 或服务器。下面示例只表示路径，不能把私钥内容写进命令或日志：
 
@@ -75,7 +75,7 @@ node deploy/standalone/release-image.mjs verify /另一个新空目录/oci /新�
 
 ```sh
 node deploy/standalone/verify-release.mjs \
-  /安全的新目录 0.5.6 /安全的新目录/standalone-account.json publisher/public.json
+  /安全的新目录 0.5.7 /安全的新目录/standalone-account.json publisher/public.json
 ```
 
 它必须显示固定发布者、签名、产品、版本及两份实际 Hub 文件一致。发布后下载实际 HTTPS assets 到新的空目录，再用同一命令复验，不能只检查上传动作成功。
